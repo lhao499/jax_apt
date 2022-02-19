@@ -19,10 +19,11 @@ class RolloutStorage(object):
     ):
         r_traj = 0
         time_step, done = self.env.reset(), False
+        phys = dict(physics=self._env._env.physics.state())
         self._current_time_step = time_step
 
         if replay_storage is not None:
-            replay_storage.add(time_step)
+            replay_storage.add(time_step, phys)
 
         for _ in range(n_trajs):
             while True:
@@ -35,21 +36,23 @@ class RolloutStorage(object):
                     random=random,
                 ).reshape(-1)
                 time_step = self.env.step(action)
+                phys = dict(physics=self._env._env.physics.state())
                 self._current_time_step = time_step
                 r_traj += time_step["reward"]
                 done = time_step.last()
 
                 if replay_storage is not None:
-                    replay_storage.add(time_step)
+                    replay_storage.add(time_step, phys)
 
                 if done or self._traj_steps >= self.max_traj_length:
                     self._traj_steps = 0
 
                     time_step, done = self.env.reset(), False
+                    phys = dict(physics=self._env._env.physics.state())
                     self._current_time_step = time_step
 
                     if replay_storage is not None:
-                        replay_storage.add(time_step)
+                        replay_storage.add(time_step, phys)
 
                     break
 
@@ -75,20 +78,22 @@ class RolloutStorage(object):
                 random=random,
             ).reshape(-1)
             time_step = self.env.step(action)
+            phys = dict(physics=self._env._env.physics.state())
             self._current_time_step = time_step
             done = time_step.last()
 
             if replay_storage is not None:
-                replay_storage.add(time_step)
+                replay_storage.add(time_step, phys)
 
             if done or self._traj_steps >= self.max_traj_length:
                 self._traj_steps = 0
 
                 time_step, done = self.env.reset(), False
+                phys = dict(physics=self._env._env.physics.state())
                 self._current_time_step = time_step
 
                 if replay_storage is not None:
-                    replay_storage.add(time_step)
+                    replay_storage.add(time_step, phys)
         data = dict()
         return data, rng
 

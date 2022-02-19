@@ -140,7 +140,7 @@ class TanhGaussianPolicy(nn.Module):
         x = jax.lax.stop_gradient(x)
         x = self.projection(x)
         actions = self.fc(x)
-        actions = jnp.tanh(actions) # first constraint the range of action
+        actions = jnp.tanh(actions)  # first constraint the range of action
         if deterministic:
             return actions
         noise = jax.random.normal(rng, shape=(self.action_dim,)) * self.policy_noise
@@ -173,7 +173,7 @@ class SamplerPolicy(object):
             )
         else:
             actions = self.act(self.params, rng, observations, deterministic)
-            actions = jnp.tanh(actions) # sampler actions always [-1, 1]
+            actions = jnp.tanh(actions)  # sampler actions always [-1, 1]
 
         assert jnp.all(jnp.isfinite(actions))
         return jax.device_get(actions)

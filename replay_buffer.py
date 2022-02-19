@@ -29,9 +29,24 @@ def load_episode(fn):
         return episode
 
 
+def relable_episode(env, episode):
+    rewards = []
+    reward_spec = env.reward_spec()
+    states = episode['physics']
+    for i in range(states.shape[0]):
+        with env.physics.reset_context():
+            env.physics.set_state(states[i])
+        reward = env.task.get_reward(env.physics)
+        reward = np.full(reward_spec.shape, reward, reward_spec.dtype)
+        rewards.append(reward)
+    episode['reward'] = np.array(rewards, dtype=reward_spec.dtype)
+    return episode
+
+
 class ReplayBufferStorage:
-    def __init__(self, data_specs, replay_dir):
+    def __init__(self, data_specs, phys_specs, replay_dir):
         self._data_specs = data_specs
+        self._phys_specs = phys_specs
         self._replay_dir = replay_dir
         replay_dir.mkdir(exist_ok=True)
         self._current_episode = defaultdict(list)
@@ -40,7 +55,9 @@ class ReplayBufferStorage:
     def __len__(self):
         return self._num_transitions
 
-    def add(self, time_step):
+    def add(self, time_step, phys):
+        for key, value in phys.items():
+            self._current_episode[key].append(value)
         for spec in self._data_specs:
             value = time_step[spec.name]
             if np.isscalar(value):
@@ -50,6 +67,9 @@ class ReplayBufferStorage:
         if time_step.last():
             episode = dict()
             for spec in self._data_specs:
+                value = self._current_episode[spec.name]
+                episode[spec.name] = np.array(value, spec.dtype)
+            for spec in self._phys_specs:
                 value = self._current_episode[spec.name]
                 episode[spec.name] = np.array(value, spec.dtype)
             self._current_episode = defaultdict(list)
@@ -162,6 +182,66 @@ class ReplayBuffer(IterableDataset):
             yield self._sample()
 
 
+class OfflineReplayBuffer(IterableDataset):
+    def __init__(self, env, replay_dir, max_size, n_worker, discount):
+        self._env = env
+        self._replay_dir = replay_dir
+        self._size = 0
+        self._max_size = max_size
+        self._n_worker = max(1, n_worker)
+        self._episode_fns = []
+        self._episodes = dict()
+        self._discount = discount
+        self._loaded = False
+
+    def _load(self, relable=True):
+        print('Labeling data...')
+        try:
+            worker_id = torch.utils.data.get_worker_info().id
+        except:
+            worker_id = 0
+        eps_fns = sorted(self._replay_dir.glob('*.npz'))
+        for eps_fn in eps_fns:
+            if self._size > self._max_size:
+                break
+            eps_idx, eps_len = [int(x) for x in eps_fn.stem.split('_')[1:]]
+            if eps_idx % self._n_worker != worker_id:
+                continue
+            episode = load_episode(eps_fn)
+            if relable:
+                episode = self._relable_reward(episode)
+            self._episode_fns.append(eps_fn)
+            self._episodes[eps_fn] = episode
+            self._size += episode_len(episode)
+
+    def _sample_episode(self):
+        if not self._loaded:
+            self._load()
+            self._loaded = True
+        eps_fn = random.choice(self._episode_fns)
+        return self._episodes[eps_fn]
+
+    def _relable_reward(self, episode):
+        return relable_episode(self._env, episode)
+
+    def _sample(self):
+        episode = self._sample_episode()
+        # add +1 for the first dummy transition
+        idx = np.random.randint(0, episode_len(episode)) + 1
+        obs = episode['observation'][idx - 1]
+        action = episode['action'][idx]
+        next_obs = episode['observation'][idx]
+        reward = episode['reward'][idx]
+        discount = episode['discount'][idx] * self._discount
+        return dict(
+            obs=obs, action=action, reward=reward, discount=discount, next_obs=next_obs
+        )
+
+    def __iter__(self):
+        while True:
+            yield self._sample()
+
+
 def _worker_init_fn(worker_id):
     seed = np.random.get_state()[1][0] + worker_id
     np.random.seed(seed)
@@ -173,19 +253,22 @@ def collate_fn(batch):
 
 
 def make_replay_loader(
-    storage, max_size, batch_size, n_worker, save_snapshot, nstep, discount
+    storage, max_size, batch_size, n_worker, save_snapshot, nstep, discount, downstream, env, replay_dir
 ):
     max_size_per_worker = max_size // max(1, n_worker)
 
-    iterable = ReplayBuffer(
-        storage,
-        max_size_per_worker,
-        n_worker,
-        nstep,
-        discount,
-        1000,
-        save_snapshot,
-    )
+    if downstream:
+        iterable = OfflineReplayBuffer(env, replay_dir, max_size_per_worker, n_worker, discount)
+    else:
+        iterable = ReplayBuffer(
+            storage,
+            max_size_per_worker,
+            n_worker,
+            nstep,
+            discount,
+            1000,
+            save_snapshot,
+        )
 
     loader = torch.utils.data.DataLoader(
         iterable,

@@ -12,7 +12,7 @@ from flax.training.common_utils import shard, shard_prng_key
 from flax.training.train_state import TrainState
 from ml_collections import ConfigDict
 
-from jax_utils import batched_random_crop, mse_loss, value_and_multi_grad
+from jax_utils import batched_random_crop, mse_loss, nonparametric_entropy, value_and_multi_grad
 from model import update_target_network
 
 
@@ -29,6 +29,9 @@ class TD3:
         config.nstep = 3
         config.expl_noise = 0.2
         config.clip_noise = 0.3
+        config.knn_k = 12
+        config.knn_avg = True
+        config.knn_log = True
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
@@ -94,6 +97,9 @@ class TD3:
             self._copy_encoder,
             self._obs_type,
             self.config.soft_target_update_rate,
+            self.config.knn_k,
+            self.config.knn_avg,
+            self.config.knn_log,
         )
 
         metrics = jax_utils.unreplicate(metrics)
@@ -104,7 +110,7 @@ class TD3:
 
 @partial(
     jax.pmap,
-    static_broadcasted_argnums=(4, 5, 6, 7),
+    static_broadcasted_argnums=list(range(4, 11)),
     axis_name="batch",
     donate_argnums=(0, 1, 3),
 )
@@ -117,14 +123,19 @@ def train_step(
     copy_encoder,
     obs_type,
     soft_target_update_rate,
+    knn_k,
+    knn_avg,
+    knn_log,
 ):
     def loss_fn(params, rng):
         randaug = batched_random_crop if obs_type != "states" else lambda _, x: x
         obs = randaug(rng, batch["obs"])
         action = batch["action"]
-        reward = jnp.squeeze(batch["reward"], axis=1)
+        # reward = jnp.squeeze(batch["reward"], axis=1)
         discount = jnp.squeeze(batch["discount"], axis=1)
         next_obs = randaug(rng, batch["next_obs"])
+
+        reward = jnp.squeeze(nonparametric_entropy(batch["obs"], knn_k, knn_avg, knn_log), axis=1)
 
         loss = {}
 
@@ -198,6 +209,7 @@ def train_step(
             average_qf1=aux_values["q1_pred"].mean(),
             average_qf2=aux_values["q2_pred"].mean(),
             average_target_q=aux_values["target_q_values"].mean(),
+            train_reward=aux_values["reward"].mean(),
         ),
         axis_name="batch",
     )

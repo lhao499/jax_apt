@@ -24,14 +24,14 @@ FLAGS_DEF = define_flags_with_default(
     env="walker_stand",
     obs_type="states",
     max_traj_length=1000,
-    replay_buffer_size=100000,
+    replay_buffer_size=2000001,
     seed=42,
     save_model=False,
     policy_arch="256-256",
     qf_arch="256-256",
     policy_log_std_multiplier=1.0,
     policy_log_std_offset=-1.0,
-    n_epochs=200001,
+    n_epochs=2000000,
     n_train_step_per_epoch=1,
     n_sample_step_per_epoch=1,
     eval_period=10000,
@@ -47,20 +47,32 @@ FLAGS_DEF = define_flags_with_default(
     cnn_strides="2-2-2-2",
     cnn_padding="SAME",
     latent_dim=50,
+    downstream=False,
+    replay_dir="./logs",
+    experiment_id="",
 )
 
 
 def main(argv):
     FLAGS = absl.flags.FLAGS
-
     variant = get_user_flags(FLAGS, FLAGS_DEF)
-    replay_dir = Path(tempfile.mkdtemp())
-    log_dir = Path(tempfile.mkdtemp())
+
+    if FLAGS.experiment_id == "":
+        experiment_id = uuid.uuid4().hex
+    else:
+        experiment_id = f"{FLAGS.experiment_id}-{uuid.uuid4().hex}"
+
+    if FLAGS.downstream:
+        replay_dir = Path(FLAGS.replay_dir)
+    else:
+        replay_dir = Path(FLAGS.replay_dir) / experiment_id
+        replay_dir.mkdir(parents=True, exist_ok=True)
+
     wandb.init(
         config=copy(variant),
         project="TD3",
-        dir=log_dir,
-        id=uuid.uuid4().hex,
+        dir=Path(tempfile.mkdtemp()),
+        id=experiment_id,
         mode="online" if FLAGS.online else "offline",
     )
 
@@ -83,31 +95,6 @@ def main(argv):
         nchw=False,
     )
 
-    train_sampler = RolloutStorage(train_env, FLAGS.max_traj_length)
-    eval_sampler = RolloutStorage(test_env, FLAGS.max_traj_length)
-    data_specs = (
-        train_env.observation_spec(),
-        train_env.action_spec(),
-        specs.Array((1,), np.float32, "reward"),
-        specs.Array((1,), np.float32, "discount"),
-    )
-    replay_storage = ReplayBufferStorage(data_specs, replay_dir / "replay")
-    replay_loader = make_replay_loader(
-        replay_storage,
-        FLAGS.replay_buffer_size,
-        FLAGS.batch_size * jax.local_device_count(),
-        FLAGS.n_worker,
-        FLAGS.save_replay_buffer,
-        FLAGS.td3.nstep,
-        FLAGS.td3.discount,
-    )
-    replay_iter = None
-
-    def get_replay_iter(replay_iter):
-        if replay_iter is None:
-            replay_iter = iter(replay_loader)
-        return replay_iter
-
     dummy_env = make(
         FLAGS.env,
         FLAGS.obs_type,
@@ -118,6 +105,35 @@ def main(argv):
     )
     action_dim = dummy_env.action_spec().shape[0]
     observation_dim = dummy_env.observation_spec().shape
+
+    train_sampler = RolloutStorage(train_env, FLAGS.max_traj_length)
+    eval_sampler = RolloutStorage(test_env, FLAGS.max_traj_length)
+    data_specs = (
+        train_env.observation_spec(),
+        train_env.action_spec(),
+        specs.Array((1,), np.float32, "reward"),
+        specs.Array((1,), np.float32, "discount"),
+    )
+    phys_specs = (specs.Array((dummy_env._env.physics.state().shape[0],), np.float32, "physics"),)
+    replay_storage = ReplayBufferStorage(data_specs, phys_specs, replay_dir / "replay")
+    replay_loader = make_replay_loader(
+        replay_storage,
+        FLAGS.replay_buffer_size,
+        FLAGS.batch_size * jax.local_device_count(),
+        FLAGS.n_worker,
+        FLAGS.save_replay_buffer,
+        FLAGS.td3.nstep,
+        FLAGS.td3.discount,
+        FLAGS.downstream,
+        dummy_env,
+        replay_dir / "replay",
+    )
+    replay_iter = None
+
+    def get_replay_iter(replay_iter):
+        if replay_iter is None:
+            replay_iter = iter(replay_loader)
+        return replay_iter
 
     policy = TanhGaussianPolicy(
         action_dim,
@@ -163,15 +179,16 @@ def main(argv):
     for epoch in tqdm.tqdm(range(FLAGS.n_epochs)):
         metrics = {}
         with Timer() as rollout_timer:
-            _, rng = train_sampler.sample_step(
-                rng,
-                sampler_policy.update_params(
-                    {"params": jax_utils.unreplicate(state)["policy"].params}
-                ),
-                FLAGS.n_sample_step_per_epoch,
-                deterministic=False,
-                replay_storage=replay_storage,
-            )
+            if not FLAGS.downstream:
+                _, rng = train_sampler.sample_step(
+                    rng,
+                    sampler_policy.update_params(
+                        {"params": jax_utils.unreplicate(state)["policy"].params}
+                    ),
+                    FLAGS.n_sample_step_per_epoch,
+                    deterministic=False,
+                    replay_storage=replay_storage,
+                )
             metrics["env_steps"] = len(replay_storage)
             metrics["epoch"] = epoch
 
@@ -196,7 +213,7 @@ def main(argv):
 
                 if FLAGS.save_model:
                     save_data = {"td3": td3, "variant": variant, "epoch": epoch}
-                    with open(log_dir / f"model_epoch_{epoch}.pkl", "wb") as fout:
+                    with open(save_dir / f"model_epoch_{epoch}.pkl", "wb") as fout:
                         pickle.dump(save_data, fout)
 
         if epoch == 0 or (epoch + 1) % FLAGS.eval_period == 0:
@@ -209,7 +226,7 @@ def main(argv):
     wandb.finish()
     if FLAGS.save_model:
         save_data = {"td3": td3, "variant": variant, "epoch": epoch}
-        with open(log_dir / f"model_epoch_{epoch}.pkl", "wb") as fout:
+        with open(save_dir / f"model_epoch_{epoch}.pkl", "wb") as fout:
             pickle.dump(save_data, fout)
 
 
