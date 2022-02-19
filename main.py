@@ -114,7 +114,9 @@ def main(argv):
         specs.Array((1,), np.float32, "reward"),
         specs.Array((1,), np.float32, "discount"),
     )
-    phys_specs = (specs.Array((dummy_env._env.physics.state().shape[0],), np.float32, "physics"),)
+    phys_specs = (
+        specs.Array((dummy_env._env.physics.state().shape[0],), np.float32, "physics"),
+    )
     replay_storage = ReplayBufferStorage(data_specs, phys_specs, replay_dir / "replay")
     replay_loader = make_replay_loader(
         replay_storage,
@@ -158,23 +160,24 @@ def main(argv):
     td3 = TD3()
     td3.update_default_config(FLAGS.td3)
     state, rng = td3.create_state(
-        policy, qf, observation_dim, action_dim, rng, FLAGS.obs_type
+        policy, qf, observation_dim, action_dim, rng, FLAGS.obs_type, FLAGS.downstream
     )
     sampler_policy = SamplerPolicy(
         policy, {"params": jax_utils.unreplicate(state)["policy"].params}
     )
 
-    # wait until collecting n_worker trajectories for data loader
-    _, rng = train_sampler.sample_traj(
-        rng,
-        sampler_policy.update_params(
-            {"params": jax_utils.unreplicate(state)["policy"].params}
-        ),
-        FLAGS.n_worker,
-        deterministic=False,
-        replay_storage=replay_storage,
-        random=True,
-    )
+    if not FLAGS.downstream:
+        # wait until collecting n_worker trajectories for data loader
+        _, rng = train_sampler.sample_traj(
+            rng,
+            sampler_policy.update_params(
+                {"params": jax_utils.unreplicate(state)["policy"].params}
+            ),
+            FLAGS.n_worker,
+            deterministic=False,
+            replay_storage=replay_storage,
+            random=True,
+        )
 
     for epoch in tqdm.tqdm(range(FLAGS.n_epochs)):
         metrics = {}
@@ -213,7 +216,7 @@ def main(argv):
 
                 if FLAGS.save_model:
                     save_data = {"td3": td3, "variant": variant, "epoch": epoch}
-                    with open(save_dir / f"model_epoch_{epoch}.pkl", "wb") as fout:
+                    with open(replay_dir / f"model_epoch_{epoch}.pkl", "wb") as fout:
                         pickle.dump(save_data, fout)
 
         if epoch == 0 or (epoch + 1) % FLAGS.eval_period == 0:
@@ -226,7 +229,7 @@ def main(argv):
     wandb.finish()
     if FLAGS.save_model:
         save_data = {"td3": td3, "variant": variant, "epoch": epoch}
-        with open(save_dir / f"model_epoch_{epoch}.pkl", "wb") as fout:
+        with open(replay_dir / f"model_epoch_{epoch}.pkl", "wb") as fout:
             pickle.dump(save_data, fout)
 
 

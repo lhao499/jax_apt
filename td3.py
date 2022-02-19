@@ -12,7 +12,12 @@ from flax.training.common_utils import shard, shard_prng_key
 from flax.training.train_state import TrainState
 from ml_collections import ConfigDict
 
-from jax_utils import batched_random_crop, mse_loss, nonparametric_entropy, value_and_multi_grad
+from jax_utils import (
+    batched_random_crop,
+    mse_loss,
+    nonparametric_entropy,
+    value_and_multi_grad,
+)
 from model import update_target_network
 
 
@@ -41,13 +46,17 @@ class TD3:
     def update_default_config(self, updates):
         self.config = self.get_default_config(updates)
 
-    def create_state(self, policy, qf, observation_dim, action_dim, rng, obs_type):
+    def create_state(
+        self, policy, qf, observation_dim, action_dim, rng, obs_type, downstream
+    ):
         state = {}
 
         optimizer_class = {
             "adam": optax.adam,
             "sgd": optax.sgd,
         }[self.config.optimizer_type]
+
+        self._downstream = downstream
 
         self._obs_type = obs_type
         dummy_obs = jnp.zeros((10, *observation_dim))
@@ -100,6 +109,7 @@ class TD3:
             self.config.knn_k,
             self.config.knn_avg,
             self.config.knn_log,
+            self._downstream,
         )
 
         metrics = jax_utils.unreplicate(metrics)
@@ -110,7 +120,7 @@ class TD3:
 
 @partial(
     jax.pmap,
-    static_broadcasted_argnums=list(range(4, 11)),
+    static_broadcasted_argnums=list(range(4, 12)),
     axis_name="batch",
     donate_argnums=(0, 1, 3),
 )
@@ -126,16 +136,21 @@ def train_step(
     knn_k,
     knn_avg,
     knn_log,
+    downstream,
 ):
     def loss_fn(params, rng):
         randaug = batched_random_crop if obs_type != "states" else lambda _, x: x
         obs = randaug(rng, batch["obs"])
         action = batch["action"]
-        # reward = jnp.squeeze(batch["reward"], axis=1)
         discount = jnp.squeeze(batch["discount"], axis=1)
         next_obs = randaug(rng, batch["next_obs"])
 
-        reward = jnp.squeeze(nonparametric_entropy(batch["obs"], knn_k, knn_avg, knn_log), axis=1)
+        if not downstream:
+            reward = jnp.squeeze(
+                nonparametric_entropy(batch["obs"], knn_k, knn_avg, knn_log), axis=1
+            )
+        else:
+            reward = jnp.squeeze(batch["reward"], axis=1)
 
         loss = {}
 
