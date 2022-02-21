@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Sequence, Tuple
+from typing import Sequence, Tuple, Type
 
 import distrax
 import jax
@@ -42,18 +42,10 @@ class FullyConnectedNetwork(nn.Module):
     def __call__(self, input_tensor):
         x = input_tensor
         hidden_sizes = [int(h) for h in self.arch.split("-")]
-        for h in hidden_sizes:
-            x = nn.Dense(
-                h,
-                kernel_init=jax.nn.initializers.orthogonal(jnp.sqrt(2.0)),
-                bias_init=jax.nn.initializers.zeros,
-            )(x)
+        for idx, h in enumerate(hidden_sizes):
+            x = nn.Dense(h)(x)
             x = nn.relu(x)
-            output = nn.Dense(
-                self.output_dim,
-                kernel_init=jax.nn.initializers.orthogonal(1e-2),
-                bias_init=jax.nn.initializers.zeros,
-            )(x)
+        output = nn.Dense(self.output_dim)(x)
         return output
 
 
@@ -111,8 +103,9 @@ class TanhGaussianPolicy(nn.Module):
     action_dim: int
     arch: str = "256-256"
     obs_type: str = "states"
+    expl_noise: float = 0.1
     policy_noise: float = 0.2
-    clip_noise: float = 0.3
+    clip_noise: float = 0.5
     cnn_features: Sequence[int] = (32, 32, 32, 32)
     cnn_strides: Sequence[int] = (2, 1, 1, 1)
     cnn_padding: str = "VALID"
@@ -143,13 +136,17 @@ class TanhGaussianPolicy(nn.Module):
         actions = jnp.tanh(actions)  # first constraint the range of action
         if deterministic:
             return actions
-        noise = jax.random.normal(rng, shape=(self.action_dim,)) * self.policy_noise
         if clip:
+            noise = jax.random.normal(rng, shape=(self.action_dim,)) * self.policy_noise
             noise = noise.clip(-self.clip_noise, self.clip_noise)
             actions = actions + noise
+            actions = jnp.tanh(actions)
             return actions
-        actions = actions + noise
-        return actions
+        else:
+            noise = jax.random.normal(rng, shape=(self.action_dim,)) * self.expl_noise
+            actions = actions + noise
+            actions = jnp.tanh(actions)
+            return actions
 
 
 class SamplerPolicy(object):
@@ -163,7 +160,7 @@ class SamplerPolicy(object):
 
     @partial(jax.jit, static_argnames=("self", "deterministic"))
     def act(self, params, rng, observations, deterministic):
-        return self.policy.apply(params, rng, observations, deterministic, False)
+        return self.policy.apply(params, rng, observations, deterministic, clip=True)
 
     def __call__(self, rng, observations, deterministic=False, random=False):
         observations = jax.device_put(observations)
@@ -208,8 +205,8 @@ class Encoder(nn.Module):
 
 class Identity(nn.Module):
     @nn.compact
-    def __call__(self, observations):
-        return observations
+    def __call__(self, x):
+        return x
 
 
 class Projection(nn.Module):
@@ -220,4 +217,37 @@ class Projection(nn.Module):
         x = nn.Dense(self.latent_dim)(x)
         x = nn.LayerNorm()(x)
         x = nn.tanh(x)
+        return x
+
+class Sequential(nn.Module):
+    layers: Sequence[Type[nn.Module]]
+
+    @nn.compact
+    def __call__(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
+class Residual(nn.Module):
+    layers: Sequence[Type[nn.Module]]
+
+    @nn.compact
+    def __call__(self, x):
+        for layer in self.layers:
+            x = layer(x) + x
+        return x
+
+
+class PreNorm(nn.Module):
+    layers: Sequence[Type[nn.Module]]
+
+    def setup(self):
+        self.norm = nn.LayerNorm()
+
+    @nn.compact
+    def __call__(self, x):
+        for layer in self.layers:
+            x = self.norm(x)
+            x = layer(x)
         return x

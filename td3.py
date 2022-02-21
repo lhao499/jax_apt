@@ -32,11 +32,12 @@ class TD3:
         config.optimizer_type = "adam"
         config.soft_target_update_rate = 5e-3
         config.nstep = 3
-        config.expl_noise = 0.2
-        config.clip_noise = 0.3
-        config.knn_k = 12
+        config.expl_noise = 0.1
+        config.policy_noise = 0.2
+        config.clip_noise = 0.5
+        config.knn_k = 3
         config.knn_avg = True
-        config.knn_log = True
+        config.knn_log = False
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())

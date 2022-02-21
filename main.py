@@ -29,8 +29,6 @@ FLAGS_DEF = define_flags_with_default(
     save_model=False,
     policy_arch="256-256",
     qf_arch="256-256",
-    policy_log_std_multiplier=1.0,
-    policy_log_std_offset=-1.0,
     n_epochs=2000000,
     n_train_step_per_epoch=1,
     n_sample_step_per_epoch=1,
@@ -57,14 +55,11 @@ def main(argv):
     FLAGS = absl.flags.FLAGS
     variant = get_user_flags(FLAGS, FLAGS_DEF)
 
-    if FLAGS.experiment_id == "":
-        experiment_id = uuid.uuid4().hex
-    else:
-        experiment_id = f"{FLAGS.experiment_id}-{uuid.uuid4().hex}"
-
     if FLAGS.downstream:
+        experiment_id = "-".join(["downstream", str(FLAGS.experiment_id), str(FLAGS.replay_dir).split("/")[-1], str(uuid.uuid4().hex)])
         replay_dir = Path(FLAGS.replay_dir)
     else:
+        experiment_id = "-".join(["pretrain", str(FLAGS.experiment_id), str(uuid.uuid4().hex)])
         replay_dir = Path(FLAGS.replay_dir) / experiment_id
         replay_dir.mkdir(parents=True, exist_ok=True)
 
@@ -142,6 +137,7 @@ def main(argv):
         FLAGS.policy_arch,
         FLAGS.obs_type,
         FLAGS.td3.expl_noise,
+        FLAGS.td3.policy_noise,
         FLAGS.td3.clip_noise,
         FLAGS.cnn_features,
         FLAGS.cnn_strides,
