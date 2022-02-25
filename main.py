@@ -18,7 +18,7 @@ from model import DoubleCritic, SamplerPolicy, TanhGaussianPolicy
 from replay_buffer import ReplayBufferStorage, make_replay_loader
 from sampler import RolloutStorage
 from td3 import TD3
-from utils import Timer, define_flags_with_default, get_user_flags, prefix_metrics
+from utils import Timer, define_flags_with_default, get_user_flags, prefix_metrics, load_checkpoint
 
 FLAGS_DEF = define_flags_with_default(
     env="walker_stand",
@@ -46,8 +46,9 @@ FLAGS_DEF = define_flags_with_default(
     cnn_padding="SAME",
     latent_dim=50,
     downstream=False,
-    replay_dir="./logs",
+    replay_dir="/shared/hao/dataset/big",
     experiment_id="",
+    checkpoint="",
 )
 
 
@@ -69,6 +70,7 @@ def main(argv):
         dir=Path(tempfile.mkdtemp()),
         id=experiment_id,
         mode="online" if FLAGS.online else "offline",
+        settings=wandb.Settings(start_method="thread"),
     )
 
     rng = jax.random.PRNGKey(FLAGS.seed)
@@ -230,4 +232,6 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    import torch
+    torch.multiprocessing.set_start_method('spawn')
     absl.app.run(main)

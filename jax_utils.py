@@ -128,6 +128,7 @@ class PBE(object):
 
 
 def nonparametric_entropy(data, knn_k, knn_avg=False, knn_log=True, knn_clip=0.0):
+    data = data / jnp.linalg.norm(data, axis=-1, keepdims=True)
     bs = data.shape[0]
     dist = jnp.linalg.norm(
         data[:, None, :].reshape((bs, 1, -1)) - data[None, :, :].reshape((1, bs, -1)),

@@ -251,3 +251,32 @@ class PreNorm(nn.Module):
             x = self.norm(x)
             x = layer(x)
         return x
+
+
+class ICM(nn.Module):
+    obs_dim: int
+    action_dim: int
+    hidden_dim: int
+    representation_dim: int
+
+    def setup(self):
+        self.trunk = Sequential(nn.Dense(self.obs_dim, self.representation_dim),
+                                   nn.LayerNorm(self.representation_dim), nn.tanh)
+
+        self.forward_net = Sequential(
+            nn.Dense(self.representation_dim + self.action_dim, self.hidden_dim), nn.relu,
+            nn.Dense(self.hidden_dim, self.representation_dim))
+
+        self.backward_net = Sequential(
+            nn.Dense(2 * self.representation_dim, self.hidden_dim), nn.relu,
+            nn.Dense(self.hidden_dim, self.action_dim), nn.tanh)
+
+    def __call__(self, obs, action, next_obs):
+        obs = self.trunk(obs)
+        next_obs = self.trunk(next_obs)
+        next_obs_hat = self.forward_net(jnp.concatenate([obs, action], axis=-1))
+        action_hat = self.backward_net(jnp.concatenate([obs, next_obs], axis=-1))
+        forward_error = jnp.linalg.norm(next_obs - next_obs_hat, axis=-1, ord=2, keepdims=True)
+        backward_error = jnp.linalg.norm(action - action_hat, axis=-1, ord=2, keepdims=True)
+        representation = next_obs
+        return forward_error, backward_error, representation

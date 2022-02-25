@@ -254,3 +254,17 @@ def schedule(schdl, step):
                 mix = np.clip((step - duration1) / duration2, 0.0, 1.0)
                 return (1.0 - mix) * final1 + mix * final2
     raise NotImplementedError(schdl)
+
+
+def load_checkpoint(checkpoint_path):
+    try:
+        with open(checkpoint_path, "rb") as checkpoint_file:
+            checkpoint_data = pickle.load(checkpoint_file)
+            logging.info(
+                "Loading checkpoint from %s, saved at step %d",
+                checkpoint_path,
+                checkpoint_data["step"],
+            )
+            return checkpoint_data
+    except FileNotFoundError:
+        return None
