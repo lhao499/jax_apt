@@ -49,7 +49,7 @@ def value_and_multi_grad(fun, n_outputs, argnums=0, has_aux=False):
 
 
 def batch_to_jax(batch):
-    return {k: jax.device_put(v) for k, v in batch.items()}
+    return jax.tree_map(jax.device_put, batch)
 
 
 def random_crop(key, img, padding):

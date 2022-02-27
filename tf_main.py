@@ -15,7 +15,7 @@ from flax import jax_utils
 
 from common.dmc import make
 from model import DoubleCritic, SamplerPolicy, TanhGaussianPolicy
-from replay_buffer import ReplayBufferStorage, make_replay_loader
+from tf_replay_buffer import ReplayBufferStorage, make_replay_loader
 from sampler import RolloutStorage
 from td3 import TD3
 from utils import Timer, define_flags_with_default, get_user_flags, prefix_metrics
@@ -115,24 +115,6 @@ def main(argv):
         specs.Array((dummy_env._env.physics.state().shape[0],), np.float32, "physics"),
     )
     replay_storage = ReplayBufferStorage(data_specs, phys_specs, replay_dir / "replay")
-    replay_loader = make_replay_loader(
-        replay_storage,
-        FLAGS.replay_buffer_size,
-        FLAGS.batch_size * jax.local_device_count(),
-        FLAGS.n_worker,
-        FLAGS.save_replay_buffer,
-        FLAGS.td3.nstep,
-        FLAGS.td3.discount,
-        FLAGS.downstream,
-        dummy_env,
-        replay_dir / "replay",
-    )
-    replay_iter = None
-
-    def get_replay_iter(replay_iter):
-        if replay_iter is None:
-            replay_iter = iter(replay_loader)
-        return replay_iter
 
     policy = TanhGaussianPolicy(
         action_dim,
@@ -171,11 +153,30 @@ def main(argv):
             sampler_policy.update_params(
                 {"params": jax_utils.unreplicate(state)["policy"].params}
             ),
-            max(FLAGS.n_worker, 10),
+            max(FLAGS.n_worker, 2),
             deterministic=False,
             replay_storage=replay_storage,
             random=True,
         )
+
+    replay_loader = make_replay_loader(
+        replay_storage,
+        FLAGS.replay_buffer_size,
+        FLAGS.batch_size * jax.local_device_count(),
+        FLAGS.n_worker,
+        FLAGS.save_replay_buffer,
+        FLAGS.td3.nstep,
+        FLAGS.td3.discount,
+        FLAGS.downstream,
+        dummy_env,
+        replay_dir / "replay",
+    )
+    replay_iter = None
+
+    def get_replay_iter(replay_iter):
+        if replay_iter is None:
+            replay_iter = iter(replay_loader)
+        return replay_iter
 
     for epoch in tqdm.tqdm(range(FLAGS.n_epochs)):
         metrics = {}

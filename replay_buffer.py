@@ -1,4 +1,5 @@
 import datetime
+from dis import disco
 import io
 import random
 import traceback
@@ -7,6 +8,23 @@ from collections import defaultdict
 import numpy as np
 import torch
 from torch.utils.data import IterableDataset
+
+
+def process_episode(episode, nstep=1, discounting=1):
+    # add +1 for the first dummy transition
+    idx = np.random.randint(0, episode_len(episode) - nstep + 1) + 1
+    obs = episode["observation"][idx - 1]
+    action = episode["action"][idx]
+    next_obs = episode["observation"][idx + nstep - 1]
+    reward = np.zeros_like(episode["reward"][idx])
+    discount = np.ones_like(episode["discount"][idx])
+    for i in range(nstep):
+        step_reward = episode["reward"][idx + i]
+        reward += discount * step_reward
+        discount *= episode["discount"][idx + i] * discounting
+    return dict(
+        obs=obs, action=action, reward=reward, discount=discount, next_obs=next_obs
+    )
 
 
 def episode_len(episode):
@@ -162,20 +180,7 @@ class ReplayBuffer(IterableDataset):
             traceback.print_exc()
         self._samples_since_last_fetch += 1
         episode = self._sample_episode()
-        # add +1 for the first dummy transition
-        idx = np.random.randint(0, episode_len(episode) - self._nstep + 1) + 1
-        obs = episode["observation"][idx - 1]
-        action = episode["action"][idx]
-        next_obs = episode["observation"][idx + self._nstep - 1]
-        reward = np.zeros_like(episode["reward"][idx])
-        discount = np.ones_like(episode["discount"][idx])
-        for i in range(self._nstep):
-            step_reward = episode["reward"][idx + i]
-            reward += discount * step_reward
-            discount *= episode["discount"][idx + i] * self._discount
-        return dict(
-            obs=obs, action=action, reward=reward, discount=discount, next_obs=next_obs
-        )
+        return process_episode(episode, nstep=self._nstep, discounting=self._discount)
 
     def __iter__(self):
         while True:
@@ -244,16 +249,7 @@ class OfflineReplayBuffer(IterableDataset):
 
     def _sample(self):
         episode = self._sample_episode()
-        # add +1 for the first dummy transition
-        idx = np.random.randint(0, episode_len(episode)) + 1
-        obs = episode["observation"][idx - 1]
-        action = episode["action"][idx]
-        next_obs = episode["observation"][idx]
-        reward = episode["reward"][idx]
-        discount = episode["discount"][idx] * self._discount
-        return dict(
-            obs=obs, action=action, reward=reward, discount=discount, next_obs=next_obs
-        )
+        return process_episode(episode, nstep=1, discounting=self._discount)
 
     def __iter__(self):
         while True:
