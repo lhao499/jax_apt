@@ -159,7 +159,7 @@ def main(argv):
             random=True,
         )
 
-    replay_loader = make_replay_loader(
+    replay_buffer = make_replay_loader(
         replay_storage,
         FLAGS.replay_buffer_size,
         FLAGS.batch_size * jax.local_device_count(),
@@ -171,11 +171,11 @@ def main(argv):
         dummy_env,
         replay_dir / "replay",
     )
-    replay_iter = None
 
-    def get_replay_iter(replay_iter):
+    replay_iter = None
+    def get_replay_iter(replay_iter, replay_buffer):
         if replay_iter is None:
-            replay_iter = iter(replay_loader)
+            replay_iter = iter(replay_buffer.dataset())
         return replay_iter
 
     for epoch in tqdm.tqdm(range(FLAGS.n_epochs)):
@@ -196,10 +196,13 @@ def main(argv):
 
         with Timer() as train_timer:
             for batch_idx in range(FLAGS.n_train_step_per_epoch):
-                replay_iter = get_replay_iter(replay_iter)
+                replay_iter = get_replay_iter(replay_iter, replay_buffer)
                 batch = next(replay_iter)
                 state, rng, train_metrics = td3.train(state, batch, rng)
                 metrics.update(prefix_metrics(train_metrics, "td3"))
+
+        if (epoch + 1) % 1000 == 0:
+            replay_buffer._load()
 
         with Timer() as eval_timer:
             if epoch == 0 or (epoch + 1) % FLAGS.eval_period == 0:

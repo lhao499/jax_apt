@@ -1,7 +1,6 @@
 from concurrent.futures import process
 import datetime
 import io
-import os
 import random
 import traceback
 from collections import defaultdict
@@ -10,7 +9,6 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
 from functools import partial
-import glob
 
 
 def episode_len(episode):
@@ -24,6 +22,13 @@ def save_episode(episode, fn):
         bs.seek(0)
         with fn.open("wb") as f:
             f.write(bs.read())
+
+
+def load_episode(fn):
+    with fn.open("rb") as f:
+        episode = np.load(f)
+        episode = {k: episode[k] for k in episode.keys()}
+        return episode
 
 
 def relable_episode(env, episode):
@@ -90,86 +95,66 @@ class ReplayBufferStorage:
         save_episode(episode, self._replay_dir / eps_fn)
 
 
-def process_episode(episode, nstep=1, discounting=1):
-    # add +1 for the first dummy transition
-    idx = np.random.randint(0, episode_len(episode) - nstep + 1) + 1
-    obs = episode["observation"][idx - 1]
-    action = episode["action"][idx]
-    next_obs = episode["observation"][idx + nstep - 1]
-    reward = np.zeros_like(episode["reward"][idx])
-    discount = np.ones_like(episode["discount"][idx])
-    for i in range(nstep):
-        step_reward = episode["reward"][idx + i]
-        reward += discount * step_reward
-        discount *= episode["discount"][idx + i] * discounting
-    return dict(
-        obs=obs, action=action, reward=reward, discount=discount, next_obs=next_obs
-    )
-
-
-def load_episode(fn):
-    with fn.open("rb") as f:
-        episode = np.load(f)
-        episode = {k: episode[k] for k in episode.keys()}
-        return episode
-
-
-def load_episode_vanila(fn):
-    with open(fn, "rb") as f:
-        episode = np.load(f)
-        episode = {k: episode[k] for k in episode.keys()}
-        return episode
-
-
 class ReplayBuffer:
-    def __init__(
-        self, storage, max_size, nstep, discount, fetch_every, batch_size
-    ):
+    def __init__(self, storage, max_size, fetch_every):
         self._storage = storage
         self._size = 0
         self._max_size = max_size
         self._episode_fns = []
         self._episodes = dict()
-        self._nstep = nstep
-        self._discount = discount
         self._fetch_every = fetch_every
         self._samples_since_last_fetch = fetch_every
-        self._batch_size = batch_size
-        self._load()
-        self._dataset = None
 
-    def _load(self):
-        self._eps_fns = glob.glob(os.path.join(self._storage._replay_dir.as_posix(), "*.npz"))
+    def _sample_episode(self):
+        eps_fn = random.choice(self._episode_fns)
+        return self._episodes[eps_fn]
+
+    def _store_episode(self, eps_fn):
+        try:
+            episode = load_episode(eps_fn)
+        except:
+            return False
+        eps_len = episode_len(episode)
+        while eps_len + self._size > self._max_size:
+            early_eps_fn = self._episode_fns.pop(0)
+            early_eps = self._episodes.pop(early_eps_fn)
+            self._size -= episode_len(early_eps)
+            early_eps_fn.unlink(missing_ok=True)
+        self._episode_fns.append(eps_fn)
+        self._episode_fns.sort()
+        self._episodes[eps_fn] = episode
+        self._size += eps_len
+        return True
+
+    def _try_fetch(self):
+        if self._samples_since_last_fetch < self._fetch_every:
+            return
+        self._samples_since_last_fetch = 0
+        eps_fns = sorted(self._storage._replay_dir.glob("*.npz"), reverse=True)
+        fetched_size = 0
+        while True:
+            eps_fn = random.choice(eps_fns)
+            eps_idx, eps_len = [int(x) for x in eps_fn.stem.split("_")[1:]]
+            if eps_fn in self._episodes.keys():
+                break
+            if fetched_size + eps_len > self._max_size:
+                break
+            fetched_size += eps_len
+            if not self._store_episode(eps_fn):
+                break
+
+    def _sample(self):
+        try:
+            self._try_fetch()
+        except:
+            traceback.print_exc()
+        self._samples_since_last_fetch += 1
+        episode = self._sample_episode()
+        return episode
 
     def __iter__(self):
-        if self._dataset is None:
-            self._dataset = self._create_dataset(self._batch_size)
-            self._dataset = iter(self._dataset)
         while True:
-            if self._samples_since_last_fetch % self._fetch_every == 0:
-                self._load()
-            self._samples_since_last_fetch = (self._samples_since_last_fetch + 1) % self._fetch_every
-            yield next(self._dataset)
-
-    def _create_dataset(self, batch_size):
-        example = next(iter(self._sample_sequence()))
-        dataset = tf.data.Dataset.from_generator(
-            lambda: self._sample_sequence(),
-            {k: v.dtype
-            for k, v in example.items()},
-            {k: v.shape
-            for k, v in example.items()})
-        dataset = dataset.batch(batch_size, drop_remainder=True)
-        dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
-        dataset = dataset.as_numpy_iterator()
-        return dataset
-
-    def _sample_sequence(self):
-        while True:
-            ep_fn = random.choice(self._eps_fns)
-            episode = load_episode_vanila(ep_fn)
-            episode = process_episode(episode, self._nstep, self._discount)
-            yield episode
+            yield self._sample()
 
 
 def make_replay_loader(
@@ -187,5 +172,41 @@ def make_replay_loader(
     if downstream:
         pass
     else:
-        dataset = ReplayBuffer(storage, max_size, nstep, discount, 1000, batch_size)
-    return dataset
+        iterable = ReplayBuffer(
+            storage,
+            max_size,
+            1000
+        )
+
+    example = next(iter(iterable))
+
+    dataset = tf.data.Dataset.from_generator(lambda: iterable,
+        {k: v.dtype for k, v in example.items()},
+        {k: v.shape for k, v in example.items()})
+
+    def process_episode(episode, nstep=1, discounting=1):
+        # add +1 for the first dummy transition
+        idx = np.random.randint(0, episode_len(episode) - nstep + 1) + 1
+        obs = episode["observation"][idx - 1]
+        action = episode["action"][idx]
+        next_obs = episode["observation"][idx + nstep - 1]
+        reward = tf.zeros_like(episode["reward"][idx])
+        discount = tf.ones_like(episode["discount"][idx])
+        for i in range(nstep):
+            step_reward = episode["reward"][idx + i]
+            reward += discount * step_reward
+            discount *= episode["discount"][idx + i] * discounting
+        return dict(
+            obs=obs, action=action, reward=reward, discount=discount, next_obs=next_obs
+        )
+
+    def wrapped_process_episode(episode):
+        return process_episode(episode, nstep=nstep, discounting=discount)
+        # return tf.function(process_episode(episode, nstep=nstep, discounting=discount), input_signature=example)
+
+    dataset = dataset.map(wrapped_process_episode, num_parallel_calls=tf.data.AUTOTUNE if n_worker <= 0 else n_worker)
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
+    # dataset = dataset.make_initializable_iterator()
+    dataset = dataset.as_numpy_iterator()
+    return iter(dataset)
