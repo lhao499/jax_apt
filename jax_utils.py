@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-
+from functools import partial
 
 class JaxRNG(object):
     def __init__(self, seed):
@@ -127,28 +127,33 @@ class PBE(object):
         return reward
 
 
-def nonparametric_entropy(data, knn_k, knn_avg=False, knn_log=True, knn_clip=0.0):
+def _dist_fn(x, y):
+    return jnp.sum(jnp.square(x - y))
+
+
+@jax.jit
+def distance_fn(a, b, metric=_dist_fn):
+    return jax.vmap(jax.vmap(metric, (None, 0)), (0, None))(a, b)
+
+
+@partial(jax.jit, static_argnums=[1, 2, 3, 4])
+def nonparametric_entropy(data, knn_k=3, knn_avg=False, knn_log=True, knn_clip=0.0):
     data = data / jnp.linalg.norm(data, axis=-1, keepdims=True)
-    bs = data.shape[0]
-    dist = jnp.linalg.norm(
-        data[:, None, :].reshape((bs, 1, -1)) - data[None, :, :].reshape((1, bs, -1)),
-        axis=-1,
-    )
-    neg_dist, _ = jax.lax.top_k(-dist, knn_k)  # (b, k)
-    dist = -neg_dist
-    sort_dist = jax.lax.sort(dist, dimension=-1)
-    # k-th nearest neighbor
+    neg_distance = -distance_fn(data, data)
+    neg_distance, indices = jax.lax.top_k(neg_distance, k=min(knn_k, data.shape[0]))
+    distance = -neg_distance
     if not knn_avg:
-        entropy = sort_dist[:, -1].reshape(-1, 1)  # (b, 1)
+        distance = jax.lax.sort(distance, dimension=-1)
+        entropy = distance[:, -1].reshape(-1, 1)  # (b, 1)
         if knn_clip > 0.0:
             entropy = jnp.maximum(entropy - knn_clip, jnp.zeros_like(entropy))
-    # average k nearest neighbors
     else:
-        entropy = sort_dist.reshape(-1, 1)  # (b * k, 1)
+        entropy = distance.reshape(-1, 1)  # (b * k, 1)
         if knn_clip > 0.0:
             entropy = jnp.maximum(entropy - knn_clip, jnp.zeros_like(entropy))
-        entropy = entropy.reshape((bs, knn_k))  # (b, k)
+        entropy = entropy.reshape((data.shape[0], knn_k))  # (b, k)
         entropy = entropy.mean(axis=1, keepdims=True)  # (b, 1)
+
     if knn_log:
         reward = jnp.log(entropy + 1.0)
     else:

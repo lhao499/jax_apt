@@ -49,6 +49,8 @@ FLAGS_DEF = define_flags_with_default(
     replay_dir="/shared/hao/dataset/big",
     experiment_id="",
     checkpoint="",
+    pin_memory=False,
+    persistent_workers=True,
 )
 
 
@@ -126,12 +128,25 @@ def main(argv):
         FLAGS.downstream,
         dummy_env,
         replay_dir / "replay",
+        FLAGS.pin_memory,
+        FLAGS.persistent_workers,
     )
+
+    def prepare_data(xs):
+        local_device_count = jax.local_device_count()
+
+        def _prepare(x):
+            # x = x._numpy()  # for zero-copy conversion between TF and Numpy
+            # Reshape data to shard to multiple devices.
+            # [N, ...] -> [C, N // C, ...]
+            return x.reshape((local_device_count, -1) + x.shape[1:])
+        return jax.tree_map(_prepare, xs)
+
     replay_iter = None
 
-    def get_replay_iter(replay_iter):
+    def get_replay_iter(replay_iter, replay_loader):
         if replay_iter is None:
-            replay_iter = iter(replay_loader)
+            replay_iter = jax_utils.prefetch_to_device(map(prepare_data, replay_loader), 2)
         return replay_iter
 
     policy = TanhGaussianPolicy(
@@ -195,7 +210,7 @@ def main(argv):
 
         with Timer() as train_timer:
             for batch_idx in range(FLAGS.n_train_step_per_epoch):
-                replay_iter = get_replay_iter(replay_iter)
+                replay_iter = get_replay_iter(replay_iter, replay_loader)
                 batch = next(replay_iter)
                 state, rng, train_metrics = td3.train(state, batch, rng)
                 metrics.update(prefix_metrics(train_metrics, "td3"))

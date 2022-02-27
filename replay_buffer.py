@@ -277,6 +277,8 @@ def make_replay_loader(
     downstream,
     env,
     replay_dir,
+    pin_memory,
+    persistent_workers,
 ):
     max_size_per_worker = max_size // max(1, n_worker)
 
@@ -299,10 +301,11 @@ def make_replay_loader(
         iterable,
         batch_size=batch_size,
         num_workers=n_worker,
-        pin_memory=True,
+        pin_memory=pin_memory,
         worker_init_fn=_worker_init_fn,
         collate_fn=collate_fn,
         timeout=0,
         drop_last=True,
+        persistent_workers=persistent_workers,
     )
     return loader

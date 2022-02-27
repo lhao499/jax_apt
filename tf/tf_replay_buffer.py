@@ -1,186 +1,82 @@
-from concurrent.futures import process
-import datetime
-import io
-import os
-import random
-import traceback
-from collections import defaultdict
-
-import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
-from functools import partial
-import glob
+import jax
+import flax
+import numpy as np
+from PIL import Image
+import os
+from typing import Sequence
+from tqdm import tqdm
+import json
+from tqdm import tqdm
 
 
-def episode_len(episode):
-    # subtract -1 because the dummy first transition
-    return next(iter(episode.values())).shape[0] - 1
+def prefetch(dataset, n_prefetch):
+    # Taken from: https://github.com/google-research/vision_transformer/blob/master/vit_jax/input_pipeline.py
+    ds_iter = iter(dataset)
+    ds_iter = map(lambda x: jax.tree_map(lambda t: np.asarray(memoryview(t)), x),
+                  ds_iter)
+    if n_prefetch:
+        ds_iter = flax.jax_utils.prefetch_to_device(ds_iter, n_prefetch)
+    return ds_iter
 
 
-def save_episode(episode, fn):
-    with io.BytesIO() as bs:
-        np.savez_compressed(bs, **episode)
-        bs.seek(0)
-        with fn.open("wb") as f:
-            f.write(bs.read())
+def get_data(data_dir, img_size, img_channels, num_classes, num_devices, batch_size, shuffle_buffer=1000):
+    """
 
+    Args:
+        data_dir (str): Root directory of the dataset.
+        img_size (int): Image size for training.
+        img_channels (int): Number of image channels.
+        num_classes (int): Number of classes, 0 for no classes.
+        num_devices (int): Number of devices.
+        batch_size (int): Batch size (per device).
+        shuffle_buffer (int): Buffer used for shuffling the dataset.
 
-def relable_episode(env, episode):
-    rewards = []
-    reward_spec = env.reward_spec()
-    states = episode["physics"]
-    for i in range(states.shape[0]):
-        with env.physics.reset_context():
-            env.physics.set_state(states[i])
-        reward = env.task.get_reward(env.physics)
-        reward = np.full(reward_spec.shape, reward, reward_spec.dtype)
-        rewards.append(reward)
-    episode["reward"] = np.array(rewards, dtype=reward_spec.dtype)[..., None]
-    return episode
+    Returns:
+        (tf.data.Dataset): Dataset.
+    """
 
+    def pre_process(serialized_example):
+        feature = {'height': tf.io.FixedLenFeature([], tf.int64),
+                   'width': tf.io.FixedLenFeature([], tf.int64),
+                   'channels': tf.io.FixedLenFeature([], tf.int64),
+                   'image': tf.io.FixedLenFeature([], tf.string),
+                   'label': tf.io.FixedLenFeature([], tf.int64)}
+        example = tf.io.parse_single_example(serialized_example, feature)
 
-class ReplayBufferStorage:
-    def __init__(self, data_specs, phys_specs, replay_dir):
-        self._data_specs = data_specs
-        self._phys_specs = phys_specs
-        self._replay_dir = replay_dir
-        replay_dir.mkdir(exist_ok=True)
-        self._current_episode = defaultdict(list)
-        self._preload()
+        height = tf.cast(example['height'], dtype=tf.int64)
+        width = tf.cast(example['width'], dtype=tf.int64)
+        channels = tf.cast(example['channels'], dtype=tf.int64)
 
-    def __len__(self):
-        return self._num_transitions
+        image = tf.io.decode_raw(example['image'], out_type=tf.uint8)
+        image = tf.reshape(image, shape=[height, width, channels])
 
-    def add(self, time_step, phys):
-        for key, value in phys.items():
-            self._current_episode[key].append(value)
-        for spec in self._data_specs:
-            value = time_step[spec.name]
-            if np.isscalar(value):
-                value = np.full(spec.shape, value, spec.dtype)
-            assert spec.shape == value.shape and spec.dtype == value.dtype
-            self._current_episode[spec.name].append(value)
-        if time_step.last():
-            episode = dict()
-            for spec in self._data_specs:
-                value = self._current_episode[spec.name]
-                episode[spec.name] = np.array(value, spec.dtype)
-            for spec in self._phys_specs:
-                value = self._current_episode[spec.name]
-                episode[spec.name] = np.array(value, spec.dtype)
-            self._current_episode = defaultdict(list)
-            self._store_episode(episode)
+        image = tf.cast(image, dtype='float32')
+        image = tf.image.resize(image, size=[img_size, img_size], method='bicubic', antialias=True)
+        image = tf.image.random_flip_left_right(image)
 
-    def _preload(self):
-        self._num_episodes = 0
-        self._num_transitions = 0
-        for fn in self._replay_dir.glob("*.npz"):
-            _, _, eps_len = fn.stem.split("_")
-            self._num_episodes += 1
-            self._num_transitions += int(eps_len)
+        image = (image - 127.5) / 127.5
 
-    def _store_episode(self, episode):
-        eps_idx = self._num_episodes
-        eps_len = episode_len(episode)
-        self._num_episodes += 1
-        self._num_transitions += eps_len
-        ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
-        eps_fn = f"{ts}_{eps_idx}_{eps_len}.npz"
-        save_episode(episode, self._replay_dir / eps_fn)
+        label = tf.one_hot(example['label'], num_classes)
+        return {'image': image, 'label': label}
 
+    def shard(data):
+        # Reshape images from [num_devices * batch_size, H, W, C] to [num_devices, batch_size, H, W, C]
+        # because the first dimension will be mapped across devices using jax.pmap
+        data['image'] = tf.reshape(data['image'], [num_devices, -1, img_size, img_size, img_channels])
+        data['label'] = tf.reshape(data['label'], [num_devices, -1, num_classes])
+        return data
 
-def process_episode(episode, nstep=1, discounting=1):
-    # add +1 for the first dummy transition
-    idx = np.random.randint(0, episode_len(episode) - nstep + 1) + 1
-    obs = episode["observation"][idx - 1]
-    action = episode["action"][idx]
-    next_obs = episode["observation"][idx + nstep - 1]
-    reward = np.zeros_like(episode["reward"][idx])
-    discount = np.ones_like(episode["discount"][idx])
-    for i in range(nstep):
-        step_reward = episode["reward"][idx + i]
-        reward += discount * step_reward
-        discount *= episode["discount"][idx + i] * discounting
-    return dict(
-        obs=obs, action=action, reward=reward, discount=discount, next_obs=next_obs
-    )
+    print('Loading TFRecord...')
+    with open(os.path.join(data_dir, 'dataset_info.json'), 'r') as fin:
+        dataset_info = json.load(fin)
 
+    ds = tf.data.TFRecordDataset(filenames=os.path.join(data_dir, 'dataset.tfrecords'))
 
-def load_episode(fn):
-    with fn.open("rb") as f:
-        episode = np.load(f)
-        episode = {k: episode[k] for k in episode.keys()}
-        return episode
-
-
-def load_episode_vanila(fn):
-    with open(fn, "rb") as f:
-        episode = np.load(f)
-        episode = {k: episode[k] for k in episode.keys()}
-        return episode
-
-
-class ReplayBuffer:
-    def __init__(
-        self, storage, max_size, nstep, discount, fetch_every, batch_size
-    ):
-        self._storage = storage
-        self._size = 0
-        self._max_size = max_size
-        self._episode_fns = []
-        self._episodes = dict()
-        self._nstep = nstep
-        self._discount = discount
-        self._fetch_every = fetch_every
-        self._samples_since_last_fetch = fetch_every
-        self._batch_size = batch_size
-        self._load()
-        self._dataset = None
-
-    def _load(self):
-        self._eps_fns = glob.glob(os.path.join(self._storage._replay_dir.as_posix(), "*.npz"))
-
-    def dataset(self):
-        if self._dataset is None:
-            self._dataset = self._create_dataset(self._batch_size)
-        return self._dataset
-
-    def _create_dataset(self, batch_size):
-        example = next(iter(self._sample_sequence()))
-        dataset = tf.data.Dataset.from_generator(
-            lambda: self._sample_sequence(),
-            {k: v.dtype
-            for k, v in example.items()},
-            {k: v.shape
-            for k, v in example.items()})
-        dataset = dataset.batch(batch_size, drop_remainder=True)
-        dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
-        dataset = dataset.as_numpy_iterator()
-        return dataset
-
-    def _sample_sequence(self):
-        while True:
-            ep_fn = random.choice(self._eps_fns)
-            episode = load_episode_vanila(ep_fn)
-            episode = process_episode(episode, self._nstep, self._discount)
-            yield episode
-
-
-def make_replay_loader(
-    storage,
-    max_size,
-    batch_size,
-    n_worker,
-    save_snapshot,
-    nstep,
-    discount,
-    downstream,
-    env,
-    replay_dir,
-):
-    if downstream:
-        pass
-    else:
-        dataset = ReplayBuffer(storage, max_size, nstep, discount, 1000, batch_size)
-    return dataset
+    ds = ds.shuffle(min(dataset_info['num_examples'], shuffle_buffer))
+    ds = ds.map(pre_process, tf.data.AUTOTUNE)
+    ds = ds.batch(batch_size * num_devices, drop_remainder=True)
+    ds = ds.map(shard, tf.data.AUTOTUNE)
+    ds = ds.prefetch(1)
+    return ds, dataset_info

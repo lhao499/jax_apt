@@ -15,7 +15,7 @@ from flax import jax_utils
 
 from common.dmc import make
 from model import DoubleCritic, SamplerPolicy, TanhGaussianPolicy
-from tf_replay_buffer import ReplayBufferStorage, make_replay_loader
+from tf_replay_buffer_v3 import ReplayBufferStorage, make_replay_loader
 from sampler import RolloutStorage
 from td3 import TD3
 from utils import Timer, define_flags_with_default, get_user_flags, prefix_metrics

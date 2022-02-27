@@ -8,7 +8,6 @@ import jax
 import jax.numpy as jnp
 import optax
 from flax import jax_utils
-from flax.training.common_utils import shard, shard_prng_key
 from flax.training.train_state import TrainState
 from ml_collections import ConfigDict
 
@@ -84,19 +83,13 @@ class TD3:
         self._model_keys = tuple(["policy", "qf"])
 
         self._copy_encoder = False if self._obs_type == "states" else True
-        # if self._copy_encoder:
-        #     new_policy_params = state["policy"].params.copy(
-        #         {"Encoder": state["qf"].params["Encoder"]}
-        #     )
-        #     state["policy"] = state["policy"].replace(params=new_policy_params)
 
         state = jax_utils.replicate(state)
 
         return state, rng
 
     def train(self, state, batch, rng):
-        rng = shard_prng_key(rng)
-        batch = jax.tree_map(shard, batch)
+        rng = jax.random.split(rng, num=jax.local_device_count())
 
         state, metrics, rng, self._target_qf_params = train_step(
             state,
