@@ -10,6 +10,7 @@ import jax
 import numpy as np
 import tqdm
 import wandb
+import torch
 from dm_env import specs
 from flax import jax_utils
 
@@ -32,7 +33,7 @@ FLAGS_DEF = define_flags_with_default(
     n_epochs=2000000,
     n_train_step_per_epoch=1,
     n_sample_step_per_epoch=1,
-    eval_period=10000,
+    eval_period=50000,
     eval_n_trajs=5,
     frame_stack=1,
     action_repeat=1,
@@ -205,15 +206,12 @@ def main(argv):
                     deterministic=False,
                     replay_storage=replay_storage,
                 )
-            metrics["env_steps"] = len(replay_storage)
-            metrics["epoch"] = epoch
 
         with Timer() as train_timer:
             for batch_idx in range(FLAGS.n_train_step_per_epoch):
                 replay_iter = get_replay_iter(replay_iter, replay_loader)
                 batch = next(replay_iter)
                 state, rng, train_metrics = td3.train(state, batch, rng)
-                metrics.update(prefix_metrics(train_metrics, "td3"))
 
         with Timer() as eval_timer:
             if epoch == 0 or (epoch + 1) % FLAGS.eval_period == 0:
@@ -225,7 +223,6 @@ def main(argv):
                     FLAGS.eval_n_trajs,
                     deterministic=True,
                 )
-                metrics["average_return"] = data["r_traj"]
 
                 if FLAGS.save_model:
                     save_data = {"td3": td3, "variant": variant, "epoch": epoch}
@@ -233,6 +230,10 @@ def main(argv):
                         pickle.dump(save_data, fout)
 
         if epoch == 0 or (epoch + 1) % FLAGS.eval_period == 0:
+            metrics["average_return"] = data["r_traj"]
+            metrics["env_steps"] = len(replay_storage)
+            metrics["epoch"] = epoch
+            metrics.update(prefix_metrics(train_metrics, "td3"))
             metrics["rollout_time"] = rollout_timer()
             metrics["train_time"] = train_timer()
             metrics["eval_time"] = eval_timer()
@@ -247,6 +248,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    import torch
     torch.multiprocessing.set_start_method('spawn')
     absl.app.run(main)
