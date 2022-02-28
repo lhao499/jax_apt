@@ -1,3 +1,5 @@
+import os
+os.environ['MUJOCO_GL'] = 'egl'
 import pickle
 import tempfile
 import uuid
