@@ -1,5 +1,4 @@
 import datetime
-from dis import disco
 import io
 import random
 import traceback
@@ -68,6 +67,7 @@ class ReplayBufferStorage:
         self._replay_dir = replay_dir
         replay_dir.mkdir(exist_ok=True)
         self._current_episode = defaultdict(list)
+        self._episode_fns = []
         self._preload()
 
     def __len__(self):
@@ -91,7 +91,8 @@ class ReplayBufferStorage:
                 value = self._current_episode[spec.name]
                 episode[spec.name] = np.array(value, spec.dtype)
             self._current_episode = defaultdict(list)
-            self._store_episode(episode)
+            eps_fn = self._store_episode(episode)
+            self._episode_fns.append(eps_fn)
 
     def _preload(self):
         self._num_episodes = 0
@@ -109,12 +110,15 @@ class ReplayBufferStorage:
         ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
         eps_fn = f"{ts}_{eps_idx}_{eps_len}.npz"
         save_episode(episode, self._replay_dir / eps_fn)
+        return self._replay_dir / eps_fn
+
+    @property
+    def all_eps_fns(self):
+        return self._episode_fns
 
 
-class ReplayBuffer(IterableDataset):
-    def __init__(
-        self, storage, max_size, n_worker, nstep, discount, fetch_every, save_snapshot
-    ):
+class WholeReplayBuffer(IterableDataset):
+    def __init__(self, storage, max_size, n_worker, nstep, discount, fetch_every):
         self._storage = storage
         self._size = 0
         self._max_size = max_size
@@ -125,7 +129,6 @@ class ReplayBuffer(IterableDataset):
         self._discount = discount
         self._fetch_every = fetch_every
         self._samples_since_last_fetch = fetch_every
-        self._save_snapshot = save_snapshot
 
     def _sample_episode(self):
         eps_fn = random.choice(self._episode_fns)
@@ -143,12 +146,8 @@ class ReplayBuffer(IterableDataset):
             self._size -= episode_len(early_eps)
             early_eps_fn.unlink(missing_ok=True)
         self._episode_fns.append(eps_fn)
-        self._episode_fns.sort()
         self._episodes[eps_fn] = episode
         self._size += eps_len
-
-        if not self._save_snapshot:
-            eps_fn.unlink(missing_ok=True)
         return True
 
     def _try_fetch(self):
@@ -159,9 +158,8 @@ class ReplayBuffer(IterableDataset):
             worker_id = torch.utils.data.get_worker_info().id
         except:
             worker_id = 0
-        eps_fns = sorted(self._storage._replay_dir.glob("*.npz"), reverse=True)
         fetched_size = 0
-        for eps_fn in eps_fns:
+        for eps_fn in reversed(self._storage.all_eps_fns):
             eps_idx, eps_len = [int(x) for x in eps_fn.stem.split("_")[1:]]
             if eps_idx % self._n_worker != worker_id:
                 continue
@@ -271,7 +269,6 @@ def make_replay_loader(
     max_size,
     batch_size,
     n_worker,
-    save_snapshot,
     nstep,
     discount,
     downstream,
@@ -287,14 +284,13 @@ def make_replay_loader(
             env, replay_dir, max_size_per_worker, n_worker, discount
         )
     else:
-        iterable = ReplayBuffer(
+        iterable = WholeReplayBuffer(
             storage,
             max_size_per_worker,
             n_worker,
             nstep,
             discount,
-            1000,
-            save_snapshot,
+            1000
         )
 
     loader = torch.utils.data.DataLoader(
