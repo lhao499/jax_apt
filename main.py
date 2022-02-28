@@ -117,7 +117,7 @@ def main(argv):
     phys_specs = (
         specs.Array((dummy_env._env.physics.state().shape[0],), np.float32, "physics"),
     )
-    replay_storage = ReplayBufferStorage(data_specs, phys_specs, replay_dir / "replay")
+    replay_storage = ReplayBufferStorage(data_specs, phys_specs, replay_dir / "replay", FLAGS.replay_buffer_size, FLAGS.save_replay_buffer)
     replay_loader = make_replay_loader(
         replay_storage,
         FLAGS.replay_buffer_size,

@@ -1,5 +1,4 @@
 import datetime
-from dis import disco
 import io
 import random
 import traceback
@@ -62,12 +61,17 @@ def relable_episode(env, episode):
 
 
 class ReplayBufferStorage:
-    def __init__(self, data_specs, phys_specs, replay_dir):
+    def __init__(self, data_specs, phys_specs, replay_dir, max_size, save_snapshot):
         self._data_specs = data_specs
         self._phys_specs = phys_specs
         self._replay_dir = replay_dir
         replay_dir.mkdir(exist_ok=True)
         self._current_episode = defaultdict(list)
+        self._episodes = dict()
+        self._episode_fns = []
+        self._size = 0
+        self._max_size = max_size
+        self._save_snapshot = save_snapshot
         self._preload()
 
     def __len__(self):
@@ -91,7 +95,21 @@ class ReplayBufferStorage:
                 value = self._current_episode[spec.name]
                 episode[spec.name] = np.array(value, spec.dtype)
             self._current_episode = defaultdict(list)
-            self._store_episode(episode)
+            eps_fn = self._store_episode(episode)
+
+            self._episode_fns.append(eps_fn)
+            self._episodes[eps_fn] = episode
+            eps_len = episode_len(episode)
+            self._size += eps_len
+            if eps_len + self._size > self._max_size:
+                self._episode_fns.sort()
+            while eps_len + self._size > self._max_size:
+                early_eps_fn = self._episode_fns.pop(0)
+                early_eps = self._episodes.pop(early_eps_fn)
+                self._size -= episode_len(early_eps)
+                early_eps_fn.unlink(missing_ok=True)
+            if not self._save_snapshot:
+                eps_fn.unlink(missing_ok=True)
 
     def _preload(self):
         self._num_episodes = 0
@@ -109,76 +127,20 @@ class ReplayBufferStorage:
         ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
         eps_fn = f"{ts}_{eps_idx}_{eps_len}.npz"
         save_episode(episode, self._replay_dir / eps_fn)
+        return eps_fn
 
 
 class ReplayBuffer(IterableDataset):
-    def __init__(
-        self, storage, max_size, n_worker, nstep, discount, fetch_every, save_snapshot
-    ):
+    def __init__(self, storage, nstep, discount):
         self._storage = storage
-        self._size = 0
-        self._max_size = max_size
-        self._n_worker = max(1, n_worker)
-        self._episode_fns = []
-        self._episodes = dict()
         self._nstep = nstep
         self._discount = discount
-        self._fetch_every = fetch_every
-        self._samples_since_last_fetch = fetch_every
-        self._save_snapshot = save_snapshot
 
     def _sample_episode(self):
-        eps_fn = random.choice(self._episode_fns)
-        return self._episodes[eps_fn]
-
-    def _store_episode(self, eps_fn):
-        try:
-            episode = load_episode(eps_fn)
-        except:
-            return False
-        eps_len = episode_len(episode)
-        while eps_len + self._size > self._max_size:
-            early_eps_fn = self._episode_fns.pop(0)
-            early_eps = self._episodes.pop(early_eps_fn)
-            self._size -= episode_len(early_eps)
-            early_eps_fn.unlink(missing_ok=True)
-        self._episode_fns.append(eps_fn)
-        self._episode_fns.sort()
-        self._episodes[eps_fn] = episode
-        self._size += eps_len
-
-        if not self._save_snapshot:
-            eps_fn.unlink(missing_ok=True)
-        return True
-
-    def _try_fetch(self):
-        if self._samples_since_last_fetch < self._fetch_every:
-            return
-        self._samples_since_last_fetch = 0
-        try:
-            worker_id = torch.utils.data.get_worker_info().id
-        except:
-            worker_id = 0
-        eps_fns = sorted(self._storage._replay_dir.glob("*.npz"), reverse=True)
-        fetched_size = 0
-        for eps_fn in eps_fns:
-            eps_idx, eps_len = [int(x) for x in eps_fn.stem.split("_")[1:]]
-            if eps_idx % self._n_worker != worker_id:
-                continue
-            if eps_fn in self._episodes.keys():
-                break
-            if fetched_size + eps_len > self._max_size:
-                break
-            fetched_size += eps_len
-            if not self._store_episode(eps_fn):
-                break
+        eps_fn = random.choice(self._storage._episode_fns)
+        return self._storage._episodes[eps_fn]
 
     def _sample(self):
-        try:
-            self._try_fetch()
-        except:
-            traceback.print_exc()
-        self._samples_since_last_fetch += 1
         episode = self._sample_episode()
         return process_episode(episode, nstep=self._nstep, discounting=self._discount)
 
@@ -289,13 +251,8 @@ def make_replay_loader(
     else:
         iterable = ReplayBuffer(
             storage,
-            max_size_per_worker,
-            n_worker,
             nstep,
-            discount,
-            1000,
-            save_snapshot,
-        )
+            discount)
 
     loader = torch.utils.data.DataLoader(
         iterable,
