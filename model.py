@@ -278,5 +278,5 @@ class ICM(nn.Module):
         action_hat = self.backward_net(jnp.concatenate([obs, next_obs], axis=-1))
         forward_error = jnp.linalg.norm(next_obs - next_obs_hat, axis=-1, ord=2, keepdims=True)
         backward_error = jnp.linalg.norm(action - action_hat, axis=-1, ord=2, keepdims=True)
-        representation = next_obs
+        representation = jax.lax.stop_gradient(jnp.concatenate([next_obs, action], axis=-1))
         return forward_error, backward_error, representation

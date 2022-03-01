@@ -37,6 +37,7 @@ class TD3:
         config.knn_k = 3
         config.knn_avg = True
         config.knn_log = False
+        config.knn_clip = 0.0
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
@@ -103,6 +104,7 @@ class TD3:
             self.config.knn_k,
             self.config.knn_avg,
             self.config.knn_log,
+            self.config.knn_clip,
             self._downstream,
         )
 
@@ -114,7 +116,7 @@ class TD3:
 
 @partial(
     jax.pmap,
-    static_broadcasted_argnums=list(range(4, 12)),
+    static_broadcasted_argnums=list(range(4, 13)),
     axis_name="batch",
     donate_argnums=(0, 1, 3),
 )
@@ -130,6 +132,7 @@ def train_step(
     knn_k,
     knn_avg,
     knn_log,
+    knn_clip,
     downstream,
 ):
     def loss_fn(params, rng):
@@ -140,8 +143,9 @@ def train_step(
         next_obs = randaug(rng, batch["next_obs"])
 
         if not downstream:
+            data = batch["obs"] / jnp.linalg.norm(batch["obs"], axis=-1, keepdims=True)
             reward = jnp.squeeze(
-                nonparametric_entropy(batch["obs"], knn_k, knn_avg, knn_log), axis=1
+                nonparametric_entropy(data, knn_k, knn_avg, knn_log, knn_clip), axis=1
             )
         else:
             reward = jnp.squeeze(batch["reward"], axis=1)

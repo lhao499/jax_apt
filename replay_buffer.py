@@ -186,7 +186,7 @@ class WholeReplayBuffer(IterableDataset):
 
 
 class OfflineReplayBuffer(IterableDataset):
-    def __init__(self, env, replay_dir, max_size, n_worker, discount):
+    def __init__(self, env, replay_dir, max_size, n_worker, nstep, discount):
         self._env = env
         self._replay_dir = replay_dir
         self._size = 0
@@ -194,6 +194,7 @@ class OfflineReplayBuffer(IterableDataset):
         self._n_worker = max(1, n_worker)
         self._episode_fns = []
         self._episodes = dict()
+        self._nstep = nstep
         self._discount = discount
         self._loaded = False
         self.return_stat = []
@@ -201,9 +202,9 @@ class OfflineReplayBuffer(IterableDataset):
         if not self._loaded:
             self._load()
             self._loaded = True
-        print(f"dataset size is {self._size}")
         if self._loaded:
             self._stat()
+            print(f"dataset size is {self._size}")
             print(
                 f"dataset return max {self.max_return:.5f}. min {self.min_return:.5f}. mean {self.mean_return:.5f} median {self.mean_return:.5f}"
             )
@@ -247,7 +248,7 @@ class OfflineReplayBuffer(IterableDataset):
 
     def _sample(self):
         episode = self._sample_episode()
-        return process_episode(episode, nstep=1, discounting=self._discount)
+        return process_episode(episode, nstep=self._nstep, discounting=self._discount)
 
     def __iter__(self):
         while True:
@@ -281,7 +282,7 @@ def make_replay_loader(
 
     if downstream:
         iterable = OfflineReplayBuffer(
-            env, replay_dir, max_size_per_worker, n_worker, discount
+            env, replay_dir, max_size_per_worker, n_worker, nstep, discount
         )
     else:
         iterable = WholeReplayBuffer(
