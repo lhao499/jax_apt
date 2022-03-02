@@ -176,6 +176,66 @@ class SamplerPolicy(object):
         return jax.device_get(actions)
 
 
+class MPM(nn.Module):
+    action_dim: int
+    arch: str = "256-256"
+    obs_type: str = "states"
+    representation_dim: int = 256
+    cnn_features: str = "32-32-32-32"
+    cnn_strides: str = "2-1-1-1"
+    cnn_padding: str = "VALID"
+
+    def setup(self):
+        if self.obs_type == "states":
+            self.encoder = Identity(name="Encoder")
+        elif self.obs_type == "pixels":
+            self.encoder = Encoder(
+                tuple(map(int, self.cnn_features.split("-"))),
+                tuple(map(int, self.cnn_strides.split("-"))),
+                self.cnn_padding,
+                name="Encoder",
+            )
+        else:
+            raise NotImplementedError
+        self.trunk = [
+            nn.Dense(self.representation_dim),
+            nn.LayerNorm(self.representation_dim),
+            lambda x: nn.tanh(x),
+        ]
+
+        self.forward_net = [
+            FullyConnectedNetwork(output_dim=self.representation_dim, arch=self.arch)
+        ]
+
+        self.backward_net = [
+            FullyConnectedNetwork(output_dim=self.action_dim, arch=self.arch),
+            lambda x: nn.tanh(x),
+        ]
+
+    def __call__(self, obs, action, next_obs):
+        obs = self.encoder(obs)
+        next_obs = self.encoder(next_obs)
+        for layer in self.trunk:
+            obs = layer(obs)
+        for layer in self.trunk:
+            next_obs = layer(next_obs)
+        next_obs_hat = jnp.concatenate([obs, action], axis=-1)
+        for layer in self.forward_net:
+            next_obs_hat = layer(next_obs_hat)
+        action_hat = jnp.concatenate([obs, next_obs], axis=-1)
+        for layer in self.backward_net:
+            action_hat = layer(action_hat)
+        forward_error = jnp.linalg.norm(
+            next_obs - next_obs_hat, axis=-1, ord=2, keepdims=True
+        )
+        backward_error = jnp.linalg.norm(
+            action - action_hat, axis=-1, ord=2, keepdims=True
+        )
+        prediction_error = forward_error + backward_error
+        representation = jax.lax.stop_gradient(next_obs_hat)
+        return prediction_error, representation
+
+
 class Encoder(nn.Module):
     features: Sequence[int] = (32, 32, 32, 32)
     strides: Sequence[int] = (2, 1, 1, 1)
@@ -219,6 +279,7 @@ class Projection(nn.Module):
         x = nn.tanh(x)
         return x
 
+
 class Sequential(nn.Module):
     layers: Sequence[Type[nn.Module]]
 
@@ -251,32 +312,3 @@ class PreNorm(nn.Module):
             x = self.norm(x)
             x = layer(x)
         return x
-
-
-class ICM(nn.Module):
-    obs_dim: int
-    action_dim: int
-    hidden_dim: int
-    representation_dim: int
-
-    def setup(self):
-        self.trunk = Sequential(nn.Dense(self.obs_dim, self.representation_dim),
-                                   nn.LayerNorm(self.representation_dim), nn.tanh)
-
-        self.forward_net = Sequential(
-            nn.Dense(self.representation_dim + self.action_dim, self.hidden_dim), nn.relu,
-            nn.Dense(self.hidden_dim, self.representation_dim))
-
-        self.backward_net = Sequential(
-            nn.Dense(2 * self.representation_dim, self.hidden_dim), nn.relu,
-            nn.Dense(self.hidden_dim, self.action_dim), nn.tanh)
-
-    def __call__(self, obs, action, next_obs):
-        obs = self.trunk(obs)
-        next_obs = self.trunk(next_obs)
-        next_obs_hat = self.forward_net(jnp.concatenate([obs, action], axis=-1))
-        action_hat = self.backward_net(jnp.concatenate([obs, next_obs], axis=-1))
-        forward_error = jnp.linalg.norm(next_obs - next_obs_hat, axis=-1, ord=2, keepdims=True)
-        backward_error = jnp.linalg.norm(action - action_hat, axis=-1, ord=2, keepdims=True)
-        representation = jax.lax.stop_gradient(jnp.concatenate([next_obs, action], axis=-1))
-        return forward_error, backward_error, representation

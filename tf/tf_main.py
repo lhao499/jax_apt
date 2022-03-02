@@ -12,13 +12,14 @@ import tqdm
 import wandb
 from dm_env import specs
 from flax import jax_utils
+from tf_replay_buffer_v3 import ReplayBufferStorage, make_replay_loader
 
 from common.dmc import make
 from model import DoubleCritic, SamplerPolicy, TanhGaussianPolicy
-from tf_replay_buffer_v3 import ReplayBufferStorage, make_replay_loader
 from sampler import RolloutStorage
 from td3 import TD3
-from utils import Timer, define_flags_with_default, get_user_flags, prefix_metrics
+from utils import (Timer, define_flags_with_default, get_user_flags,
+                   prefix_metrics)
 
 FLAGS_DEF = define_flags_with_default(
     env="walker_stand",
@@ -57,10 +58,19 @@ def main(argv):
     variant = get_user_flags(FLAGS, FLAGS_DEF)
 
     if FLAGS.downstream:
-        experiment_id = "-".join(["downstream", str(FLAGS.experiment_id), str(FLAGS.replay_dir).split("/")[-1], str(uuid.uuid4().hex)])
+        experiment_id = "-".join(
+            [
+                "downstream",
+                str(FLAGS.experiment_id),
+                str(FLAGS.replay_dir).split("/")[-1],
+                str(uuid.uuid4().hex),
+            ]
+        )
         replay_dir = Path(FLAGS.replay_dir)
     else:
-        experiment_id = "-".join(["pretrain", str(FLAGS.experiment_id), str(uuid.uuid4().hex)])
+        experiment_id = "-".join(
+            ["pretrain", str(FLAGS.experiment_id), str(uuid.uuid4().hex)]
+        )
         replay_dir = Path(FLAGS.replay_dir) / experiment_id
         replay_dir.mkdir(parents=True, exist_ok=True)
 
@@ -173,6 +183,7 @@ def main(argv):
     )
 
     replay_iter = None
+
     def get_replay_iter(replay_iter, replay_buffer):
         if replay_iter is None:
             replay_iter = iter(replay_buffer.dataset())
@@ -237,5 +248,6 @@ def main(argv):
 
 if __name__ == "__main__":
     import torch
-    torch.multiprocessing.set_start_method('spawn')
+
+    torch.multiprocessing.set_start_method("spawn")
     absl.app.run(main)

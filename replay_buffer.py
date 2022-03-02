@@ -286,12 +286,7 @@ def make_replay_loader(
         )
     else:
         iterable = WholeReplayBuffer(
-            storage,
-            max_size_per_worker,
-            n_worker,
-            nstep,
-            discount,
-            1000
+            storage, max_size_per_worker, n_worker, nstep, discount, 1000
         )
 
     loader = torch.utils.data.DataLoader(

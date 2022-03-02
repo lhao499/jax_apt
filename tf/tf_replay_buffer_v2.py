@@ -1,15 +1,15 @@
-from concurrent.futures import process
 import datetime
+import glob
 import io
 import random
 import traceback
 from collections import defaultdict
+from concurrent.futures import process
+from functools import partial
 
 import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
-from functools import partial
-import glob
 
 
 def episode_len(episode):
@@ -109,7 +109,9 @@ def process_episode(episode, nstep=1, discounting=1):
 
 @tf.function
 def load_episode(fn):
-    import ipdb; ipdb.set_trace()
+    import ipdb
+
+    ipdb.set_trace()
     with fn.open("rb") as f:
         episode = np.load(f)
         episode = {k: episode[k] for k in episode.keys()}
@@ -132,7 +134,10 @@ class ReplayBuffer:
             dataset = dataset.shuffle(buffer_size=len(self._eps_fns))
             # dataset = dataset.map(tf.io.read_file, num_parallel_calls=tf.data.AUTOTUNE)
             # dataset = dataset.map(load_episode, num_parallel_calls=tf.data.AUTOTUNE)
-            dataset = dataset.map(partial(process_episode, nstep=self._nstep, discounting=self._discount), num_parallel_calls=tf.data.AUTOTUNE)
+            dataset = dataset.map(
+                partial(process_episode, nstep=self._nstep, discounting=self._discount),
+                num_parallel_calls=tf.data.AUTOTUNE,
+            )
             dataset = dataset.batch(self._batch_size)
             dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
             dataset = dataset.as_numpy_iterator()

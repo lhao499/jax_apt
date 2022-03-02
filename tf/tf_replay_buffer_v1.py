@@ -1,14 +1,14 @@
-from concurrent.futures import process
 import datetime
 import io
 import random
 import traceback
 from collections import defaultdict
+from concurrent.futures import process
+from functools import partial
 
 import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
-from functools import partial
 
 
 def episode_len(episode):
@@ -172,17 +172,15 @@ def make_replay_loader(
     if downstream:
         pass
     else:
-        iterable = ReplayBuffer(
-            storage,
-            max_size,
-            1000
-        )
+        iterable = ReplayBuffer(storage, max_size, 1000)
 
     example = next(iter(iterable))
 
-    dataset = tf.data.Dataset.from_generator(lambda: iterable,
+    dataset = tf.data.Dataset.from_generator(
+        lambda: iterable,
         {k: v.dtype for k, v in example.items()},
-        {k: v.shape for k, v in example.items()})
+        {k: v.shape for k, v in example.items()},
+    )
 
     def process_episode(episode, nstep=1, discounting=1):
         # add +1 for the first dummy transition
@@ -204,7 +202,10 @@ def make_replay_loader(
         return process_episode(episode, nstep=nstep, discounting=discount)
         # return tf.function(process_episode(episode, nstep=nstep, discounting=discount), input_signature=example)
 
-    dataset = dataset.map(wrapped_process_episode, num_parallel_calls=tf.data.AUTOTUNE if n_worker <= 0 else n_worker)
+    dataset = dataset.map(
+        wrapped_process_episode,
+        num_parallel_calls=tf.data.AUTOTUNE if n_worker <= 0 else n_worker,
+    )
     dataset = dataset.batch(batch_size)
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     # dataset = dataset.make_initializable_iterator()

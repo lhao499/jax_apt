@@ -2,13 +2,9 @@ import numpy as np
 from dm_control.suite.wrappers import action_scale
 from dm_env import StepType, specs
 
-from common.dmc import (
-    ActionDTypeWrapper,
-    ActionRepeatWrapper,
-    ExtendedTimeStep,
-    ExtendedTimeStepWrapper,
-    ObservationDTypeWrapper,
-)
+from common.dmc import (ActionDTypeWrapper, ActionRepeatWrapper,
+                        ExtendedTimeStep, ExtendedTimeStepWrapper,
+                        ObservationDTypeWrapper)
 
 
 class Env:

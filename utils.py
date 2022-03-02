@@ -115,21 +115,18 @@ class WandBLogger(object):
 class VideoRecorder:
     def __init__(
         self,
-        wandb_logger,
+        root_dir,
         render_size=256,
         fps=20,
         camera_id=0,
         is_train=False,
     ):
         self.is_train = is_train
-        self.save_dir = wandb_logger.config.output_dir / (
-            "train_video" if self.is_train else "test_video"
-        )
+        self.save_dir = root_dir / ("train_video" if self.is_train else "test_video")
         self.render_size = render_size
         self.fps = fps
         self.frames = []
         self.camera_id = camera_id
-        self.online = wandb_logger.config.online
 
     def init(self, env):
         self.frames = []
@@ -149,8 +146,7 @@ class VideoRecorder:
         )
 
     def save(self, filename):
-        if self.online:
-            self.log_to_wandb()
+        self.log_to_wandb()
         path = self.save_dir / filename
         imageio.mimsave(str(path), self.frames, fps=self.fps)
 

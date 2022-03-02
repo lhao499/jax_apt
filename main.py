@@ -1,5 +1,7 @@
 import os
-os.environ['MUJOCO_GL'] = 'egl'
+from logging import root
+
+os.environ["MUJOCO_GL"] = "egl"
 import pickle
 import tempfile
 import uuid
@@ -10,18 +12,19 @@ import absl.app
 import absl.flags
 import jax
 import numpy as np
+import torch
 import tqdm
 import wandb
-import torch
 from dm_env import specs
 from flax import jax_utils
 
 from common.dmc import make
-from model import DoubleCritic, SamplerPolicy, TanhGaussianPolicy
+from model import MPM, DoubleCritic, SamplerPolicy, TanhGaussianPolicy
 from replay_buffer import ReplayBufferStorage, make_replay_loader
 from sampler import RolloutStorage
 from td3 import TD3
-from utils import Timer, define_flags_with_default, get_user_flags, prefix_metrics
+from utils import (Timer, VideoRecorder, define_flags_with_default,
+                   get_user_flags, prefix_metrics)
 
 FLAGS_DEF = define_flags_with_default(
     env="walker_stand",
@@ -46,7 +49,6 @@ FLAGS_DEF = define_flags_with_default(
     cnn_features="32-64-128-256",
     cnn_strides="2-2-2-2",
     cnn_padding="SAME",
-    latent_dim=50,
     downstream=False,
     replay_dir="/shared/hao/dataset/big",
     experiment_id="",
@@ -61,10 +63,19 @@ def main(argv):
     variant = get_user_flags(FLAGS, FLAGS_DEF)
 
     if FLAGS.downstream:
-        experiment_id = "-".join(["downstream", str(FLAGS.experiment_id), str(FLAGS.replay_dir).split("/")[-1], str(uuid.uuid4().hex)])
+        experiment_id = "-".join(
+            [
+                "downstream",
+                str(FLAGS.experiment_id),
+                str(FLAGS.replay_dir).split("/")[-1],
+                str(uuid.uuid4().hex),
+            ]
+        )
         replay_dir = Path(FLAGS.replay_dir)
     else:
-        experiment_id = "-".join(["pretrain", str(FLAGS.experiment_id), str(uuid.uuid4().hex)])
+        experiment_id = "-".join(
+            ["pretrain", str(FLAGS.experiment_id), str(uuid.uuid4().hex)]
+        )
         replay_dir = Path(FLAGS.replay_dir) / experiment_id
         replay_dir.mkdir(parents=True, exist_ok=True)
 
@@ -84,7 +95,7 @@ def main(argv):
         FLAGS.obs_type,
         FLAGS.frame_stack,
         FLAGS.action_repeat,
-        rng,
+        FLAGS.seed,
         nchw=False,
     )
     test_env = make(
@@ -92,7 +103,7 @@ def main(argv):
         FLAGS.obs_type,
         FLAGS.frame_stack,
         FLAGS.action_repeat,
-        rng + 1000,
+        FLAGS.seed + 1000,
         nchw=False,
     )
 
@@ -101,14 +112,15 @@ def main(argv):
         FLAGS.obs_type,
         FLAGS.frame_stack,
         FLAGS.action_repeat,
-        rng,
+        FLAGS.seed,
         nchw=False,
     )
     action_dim = dummy_env.action_spec().shape[0]
     observation_dim = dummy_env.observation_spec().shape
 
-    train_sampler = RolloutStorage(train_env, FLAGS.max_traj_length)
-    eval_sampler = RolloutStorage(test_env, FLAGS.max_traj_length)
+    eval_video_recoder = VideoRecorder(root_dir=replay_dir, is_train=False)
+    train_sampler = RolloutStorage(train_env, FLAGS.max_traj_length, None)
+    eval_sampler = RolloutStorage(test_env, FLAGS.max_traj_length, eval_video_recoder)
     data_specs = (
         train_env.observation_spec(),
         train_env.action_spec(),
@@ -130,7 +142,7 @@ def main(argv):
         FLAGS.cnn_features,
         FLAGS.cnn_strides,
         FLAGS.cnn_padding,
-        FLAGS.latent_dim,
+        FLAGS.td3.latent_dim,
     )
     qf = DoubleCritic(
         FLAGS.qf_arch,
@@ -138,13 +150,21 @@ def main(argv):
         FLAGS.cnn_features,
         FLAGS.cnn_strides,
         FLAGS.cnn_padding,
-        FLAGS.latent_dim,
+        FLAGS.td3.latent_dim,
     )
+    mpm = MPM(action_dim)
 
     td3 = TD3()
     td3.update_default_config(FLAGS.td3)
     state, rng = td3.create_state(
-        policy, qf, observation_dim, action_dim, rng, FLAGS.obs_type, FLAGS.downstream
+        policy,
+        qf,
+        mpm,
+        observation_dim,
+        action_dim,
+        rng,
+        FLAGS.obs_type,
+        FLAGS.downstream,
     )
     sampler_policy = SamplerPolicy(
         policy, {"params": jax_utils.unreplicate(state)["policy"].params}
@@ -183,9 +203,12 @@ def main(argv):
             # Reshape data to shard to multiple devices.
             # [N, ...] -> [C, N // C, ...]
             return x.reshape((jax.local_device_count(), -1) + x.shape[1:])
+
         return jax.tree_map(_prepare, xs)
 
-    replay_iter = iter(jax_utils.prefetch_to_device(map(prepare_data, replay_loader), 2))
+    replay_iter = iter(
+        jax_utils.prefetch_to_device(map(prepare_data, replay_loader), 2)
+    )
 
     for epoch in tqdm.tqdm(range(FLAGS.n_epochs)):
         metrics = {}
@@ -223,6 +246,7 @@ def main(argv):
                         pickle.dump(save_data, fout)
 
         if epoch == 0 or (epoch + 1) % FLAGS.eval_period == 0:
+            eval_video_recoder.log_to_wandb()
             metrics["average_return"] = data["r_traj"]
             metrics["env_steps"] = len(replay_storage)
             metrics["epoch"] = epoch
@@ -241,5 +265,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    torch.multiprocessing.set_start_method('spawn')
+    torch.multiprocessing.set_start_method("spawn")
     absl.app.run(main)

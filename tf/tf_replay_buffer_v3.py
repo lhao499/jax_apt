@@ -1,16 +1,16 @@
-from concurrent.futures import process
 import datetime
+import glob
 import io
 import os
 import random
 import traceback
 from collections import defaultdict
+from concurrent.futures import process
+from functools import partial
 
 import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
-from functools import partial
-import glob
 
 
 def episode_len(episode):
@@ -122,9 +122,7 @@ def load_episode_vanila(fn):
 
 
 class ReplayBuffer:
-    def __init__(
-        self, storage, max_size, nstep, discount, fetch_every, batch_size
-    ):
+    def __init__(self, storage, max_size, nstep, discount, fetch_every, batch_size):
         self._storage = storage
         self._size = 0
         self._max_size = max_size
@@ -139,7 +137,9 @@ class ReplayBuffer:
         self._dataset = None
 
     def _load(self):
-        self._eps_fns = glob.glob(os.path.join(self._storage._replay_dir.as_posix(), "*.npz"))
+        self._eps_fns = glob.glob(
+            os.path.join(self._storage._replay_dir.as_posix(), "*.npz")
+        )
 
     def dataset(self):
         if self._dataset is None:
@@ -150,10 +150,9 @@ class ReplayBuffer:
         example = next(iter(self._sample_sequence()))
         dataset = tf.data.Dataset.from_generator(
             lambda: self._sample_sequence(),
-            {k: v.dtype
-            for k, v in example.items()},
-            {k: v.shape
-            for k, v in example.items()})
+            {k: v.dtype for k, v in example.items()},
+            {k: v.shape for k, v in example.items()},
+        )
         dataset = dataset.batch(batch_size, drop_remainder=True)
         dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
         dataset = dataset.as_numpy_iterator()

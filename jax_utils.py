@@ -1,6 +1,8 @@
+from functools import partial
+
 import jax
 import jax.numpy as jnp
-from functools import partial
+
 
 class JaxRNG(object):
     def __init__(self, seed):
@@ -66,22 +68,28 @@ def batched_random_crop(key, imgs, padding=4):
     return jax.vmap(random_crop, (0, 0, None))(keys, imgs, padding)
 
 
-def _dist_fn(x, y):
-    return jnp.sum(jnp.square(x - y))
+def dist_fn(x, y, knn_pow):
+    return jnp.sum(jnp.linalg.norm(x - y, ord=knn_pow))
 
 
-@jax.jit
-def distance_fn(a, b, metric=_dist_fn):
-    return jax.vmap(jax.vmap(metric, (None, 0)), (0, None))(a, b)
+@partial(jax.jit, static_argnums=2)
+def distance_fn(a, b, knn_pow):
+    return jax.vmap(jax.vmap(partial(dist_fn, knn_pow=knn_pow), (None, 0)), (0, None))(
+        a, b
+    )
 
 
-@partial(jax.jit, static_argnums=[1, 2, 3, 4])
-def nonparametric_entropy(data, knn_k=512, knn_avg=True, knn_log=False, knn_clip=0.0):
+@partial(jax.jit, static_argnums=list(range(1, 6)))
+def nonparametric_entropy(
+    data, knn_k=512, knn_avg=True, knn_log=False, knn_clip=0.0, knn_pow=2
+):
+    if knn_pow == -1:
+        knn_pow = data.shape[1]
     knn_k = min(knn_k, data.shape[0])
-    neg_distance = -distance_fn(data, data)
+    neg_distance = -distance_fn(data, data, knn_pow)
     neg_distance, indices = jax.lax.top_k(neg_distance, k=knn_k)
     distance = -neg_distance
-    if knn_avg: # averaging
+    if knn_avg:  # averaging
         entropy = distance.reshape(-1, 1)  # (b * k, 1)
         if knn_clip > 0.0:
             entropy = jnp.maximum(entropy - knn_clip, jnp.zeros_like(entropy))
@@ -93,7 +101,7 @@ def nonparametric_entropy(data, knn_k=512, knn_avg=True, knn_log=False, knn_clip
         if knn_clip > 0.0:
             entropy = jnp.maximum(entropy - knn_clip, jnp.zeros_like(entropy))
 
-    if knn_log: # rescaling
+    if knn_log:  # rescaling
         reward = jnp.log(entropy + 1.0)
     else:
         reward = entropy
