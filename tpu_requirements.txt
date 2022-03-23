@@ -1,39 +1,17 @@
--f https://storage.googleapis.com/jax-releases/jax_releases.html
-jax[tpu]
+-f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+jax[tpu]==0.3.1
 flax
 optax
 distrax
--f https://download.pytorch.org/whl/cpu/torch_stable.html
-torch
-torchvision
-torchaudio
-pylint
-black
-flake8
-ipdb
-einops
-glfw
-scikit-learn
-scikit-image
-setuptools
-panda
-scipy
-glob2
-gpustat
-imageio
-imageio-ffmpeg
-moviepy
-opencv-python
-wandb
-distrax
-seaborn
-absl-py
-gtimer
-joblib
-ml_collections
-dm-control
-mujoco_py
-gym
+-f https://download.pytorch.org/whl/lts/1.8/torch_lts.html
+torch==1.8.2+cpu
+torchvision==0.9.2+cpu
+timm
 transformers
-tensorflow
-tensorflow_datasets
+tqdm
+cloudpickle
+dill
+ml_collections
+wandb==0.12.7
+scikit-image
+gcsfs

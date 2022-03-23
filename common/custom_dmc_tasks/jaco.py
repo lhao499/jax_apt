@@ -23,9 +23,16 @@ from dm_control.composer import initializers
 from dm_control.composer.observation import observable
 from dm_control.composer.variation import distributions
 from dm_control.entities import props
-from dm_control.manipulation.shared import (arenas, cameras, constants,
-                                            observations, registry, robots,
-                                            tags, workspaces)
+from dm_control.manipulation.shared import (
+    arenas,
+    cameras,
+    constants,
+    observations,
+    registry,
+    robots,
+    tags,
+    workspaces,
+)
 from dm_control.utils import rewards
 
 _ReachWorkspace = collections.namedtuple(

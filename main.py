@@ -1,61 +1,62 @@
-import os
-from logging import root
+if __name__ == "__main__":
+    import os
+    from logging import root
 
-os.environ["MUJOCO_GL"] = "egl"
-import pickle
-import tempfile
-import uuid
-from copy import copy
-from pathlib import Path
+    os.environ["MUJOCO_GL"] = "egl"
+    import pickle
+    import tempfile
+    import uuid
+    from copy import copy
+    from pathlib import Path
 
-import absl.app
-import absl.flags
-import jax
-import numpy as np
-import torch
-import tqdm
-import wandb
-from dm_env import specs
-from flax import jax_utils
+    import absl.app
+    import absl.flags
+    import jax
+    import numpy as np
+    import torch
+    import tqdm
+    import wandb
+    from dm_env import specs
+    from flax import jax_utils
 
-from common.dmc import make
-from model import MPM, DoubleCritic, SamplerPolicy, TanhGaussianPolicy
-from replay_buffer import ReplayBufferStorage, make_replay_loader
-from sampler import RolloutStorage
-from td3 import TD3
-from utils import (Timer, VideoRecorder, define_flags_with_default,
-                   get_user_flags, prefix_metrics)
+    from common.dmc import make
+    from model import MPM, DoubleCritic, SamplerPolicy, TanhGaussianPolicy
+    from replay_buffer import ReplayBufferStorage, make_replay_loader
+    from sampler import RolloutStorage
+    from td3 import TD3
+    from utils import (Timer, VideoRecorder, define_flags_with_default,
+                       get_user_flags, prefix_metrics)
 
-FLAGS_DEF = define_flags_with_default(
-    env="walker_stand",
-    obs_type="states",
-    max_traj_length=1000,
-    replay_buffer_size=int(1e12),
-    seed=42,
-    save_model=False,
-    policy_arch="256-256",
-    qf_arch="256-256",
-    n_epochs=2000000,
-    n_train_step_per_epoch=1,
-    n_sample_step_per_epoch=1,
-    eval_period=50000,
-    eval_n_trajs=5,
-    frame_stack=1,
-    action_repeat=1,
-    batch_size=256,
-    n_worker=4,
-    td3=TD3.get_default_config(),
-    online=False,
-    cnn_features="32-64-128-256",
-    cnn_strides="2-2-2-2",
-    cnn_padding="SAME",
-    downstream=False,
-    replay_dir="/shared/hao/dataset/big",
-    experiment_id="",
-    checkpoint="",
-    pin_memory=False,
-    persistent_workers=True,
-)
+    FLAGS_DEF = define_flags_with_default(
+        env="walker_stand",
+        obs_type="states",
+        max_traj_length=1000,
+        replay_buffer_size=int(1e12),
+        seed=42,
+        save_model=False,
+        policy_arch="256-256",
+        qf_arch="256-256",
+        n_epochs=2000000,
+        n_train_step_per_epoch=1,
+        n_sample_step_per_epoch=1,
+        eval_period=50000,
+        eval_n_trajs=5,
+        frame_stack=1,
+        action_repeat=1,
+        batch_size=256,
+        n_worker=4,
+        td3=TD3.get_default_config(),
+        online=False,
+        cnn_features="32-64-128-256",
+        cnn_strides="2-2-2-2",
+        cnn_padding="SAME",
+        downstream=False,
+        replay_dir="/shared/hao/dataset/sep",
+        experiment_id="",
+        checkpoint="",
+        pin_memory=False,
+        persistent_workers=True,
+    )
 
 
 def main(argv):

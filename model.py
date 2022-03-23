@@ -200,7 +200,6 @@ class MPM(nn.Module):
         self.trunk = [
             nn.Dense(self.representation_dim),
             nn.LayerNorm(self.representation_dim),
-            lambda x: nn.tanh(x),
         ]
 
         self.forward_net = [
