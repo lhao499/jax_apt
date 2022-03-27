@@ -1,4 +1,4 @@
-from common.custom_dmc_tasks import cheetah, hopper, jaco, quadruped, walker
+from . import cheetah, hopper, jaco, quadruped, walker
 
 
 def make(

@@ -1,31 +1,37 @@
 if __name__ == "__main__":
     import os
-    from logging import root
 
     os.environ["MUJOCO_GL"] = "egl"
+
+    import dataclasses
     import pickle
+    import pprint
     import tempfile
     import uuid
     from copy import copy
+    from functools import partial
     from pathlib import Path
 
     import absl.app
     import absl.flags
+    import flax
     import jax
+    import jax.numpy as jnp
     import numpy as np
+    import optax
     import torch
     import tqdm
     import wandb
     from dm_env import specs
     from flax import jax_utils
-
-    from common.dmc import make
     from model import MPM, DoubleCritic, SamplerPolicy, TanhGaussianPolicy
     from replay_buffer import ReplayBufferStorage, make_replay_loader
     from sampler import RolloutStorage
     from td3 import TD3
-    from utils import (Timer, VideoRecorder, define_flags_with_default,
-                       get_user_flags, prefix_metrics)
+
+    from .dmc_env.dmc import make
+    from .utils import (Timer, VideoRecorder, define_flags_with_default,
+                        get_user_flags, prefix_metrics)
 
     FLAGS_DEF = define_flags_with_default(
         env="walker_stand",

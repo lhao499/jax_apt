@@ -7,7 +7,7 @@ from dm_control import manipulation, suite
 from dm_control.suite.wrappers import action_scale, pixels
 from dm_env import StepType, specs
 
-import common.custom_dmc_tasks as cdmc
+from ..dmc_env import custom_dmc_tasks as cdmc
 
 
 class ExtendedTimeStep(NamedTuple):

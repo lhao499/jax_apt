@@ -11,9 +11,9 @@ from flax import jax_utils
 from flax.training.train_state import TrainState
 from ml_collections import ConfigDict
 
-from jax_utils import (batched_random_crop, mse_loss, nonparametric_entropy,
-                       value_and_multi_grad)
-from model import update_target_network
+from .model import update_target_network
+from .utils import (batched_random_crop, mse_loss, next_rng,
+                    nonparametric_entropy, value_and_multi_grad)
 
 
 @dataclass
@@ -24,19 +24,15 @@ class TD3:
         config.discount = 0.99
         config.policy_lr = 3e-4
         config.qf_lr = 3e-4
-        config.mpm_lr = 3e-4
+        config.icm_lr = 3e-4
         config.optimizer_type = "adam"
         config.soft_target_update_rate = 5e-3
         config.nstep = 3
-        config.expl_noise = 0.1
-        config.policy_noise = 0.2
-        config.clip_noise = 0.5
         config.knn_k = 3
         config.knn_avg = True
         config.knn_log = False
         config.knn_clip = 0.0
         config.knn_pow = 2
-        config.latent_dim = 50
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
@@ -46,9 +42,7 @@ class TD3:
     def update_default_config(self, updates):
         self.config = self.get_default_config(updates)
 
-    def create_state(
-        self, policy, qf, mpm, observation_dim, action_dim, rng, obs_type, downstream
-    ):
+    def create_state(self, policy, qf, icm, observation_dim, action_dim, obs_type):
         state = {}
 
         optimizer_class = {
@@ -56,21 +50,19 @@ class TD3:
             "sgd": optax.sgd,
         }[self.config.optimizer_type]
 
-        self._downstream = downstream
-
         self._obs_type = obs_type
         dummy_obs = jnp.zeros((10, *observation_dim))
 
-        rng, split_rng = jax.random.split(rng)
-        policy_params = policy.init(split_rng, split_rng, dummy_obs)["params"]
+        policy_params = policy.init(next_rng(), next_rng(), dummy_obs)["params"]
         state["policy"] = TrainState.create(
             params=policy_params,
             tx=optimizer_class(self.config.policy_lr),
             apply_fn=policy.apply,
         )
 
-        rng, split_rng = jax.random.split(rng)
-        qf_params = qf.init(split_rng, dummy_obs, jnp.zeros((10, action_dim)))["params"]
+        qf_params = qf.init(next_rng(), dummy_obs, jnp.zeros((10, action_dim)))[
+            "params"
+        ]
         state["qf"] = TrainState.create(
             params=qf_params,
             tx=optimizer_class(self.config.qf_lr),
@@ -79,27 +71,22 @@ class TD3:
         self._target_qf_params = deepcopy({"qf": qf_params})
         self._target_qf_params = jax_utils.replicate(self._target_qf_params)
 
-        rng, split_rng = jax.random.split(rng)
-        mpm_params = mpm.init(
-            split_rng, dummy_obs, jnp.zeros((10, action_dim)), dummy_obs
+        icm_params = icm.init(
+            next_rng(), dummy_obs, jnp.zeros((10, action_dim)), dummy_obs
         )["params"]
-        state["mpm"] = TrainState.create(
-            params=mpm_params,
-            tx=optimizer_class(self.config.mpm_lr),
-            apply_fn=mpm.apply,
+        state["icm"] = TrainState.create(
+            params=icm_params,
+            tx=optimizer_class(self.config.icm_lr),
+            apply_fn=icm.apply,
         )
 
-        self._model_keys = tuple(["policy", "qf", "mpm"])
+        self._model_keys = tuple(["policy", "qf", "icm"])
 
         self._copy_encoder = False if self._obs_type == "states" else True
 
-        state = jax_utils.replicate(state)
-
-        return state, rng
+        return state
 
     def train(self, state, batch, rng):
-        rng = jax.random.split(rng, num=jax.local_device_count())
-
         state, metrics, rng, self._target_qf_params = train_step(
             state,
             rng,
@@ -114,18 +101,13 @@ class TD3:
             self.config.knn_log,
             self.config.knn_clip,
             self.config.knn_pow,
-            self._downstream,
         )
-
-        metrics = jax_utils.unreplicate(metrics)
-        rng = jax_utils.unreplicate(rng)
-
         return state, rng, metrics
 
 
 @partial(
     jax.pmap,
-    static_broadcasted_argnums=list(range(4, 14)),
+    static_broadcasted_argnums=list(range(4, 13)),
     axis_name="batch",
     donate_argnums=(0, 1, 3),
 )
@@ -143,7 +125,6 @@ def train_step(
     knn_log,
     knn_clip,
     knn_pow,
-    downstream,
 ):
     def loss_fn(params, rng):
         randaug = batched_random_crop if obs_type != "states" else lambda _, x: x
@@ -152,23 +133,15 @@ def train_step(
         discount = jnp.squeeze(batch["discount"], axis=1)
         next_obs = randaug(rng, batch["next_obs"])
 
-        if downstream:
-            reward = jnp.squeeze(batch["reward"], axis=1)
-        else:
-            # data = batch["obs"] / jnp.linalg.norm(batch["obs"], axis=-1, keepdims=True)
-            # data = jnp.concatenate([data, action], axis=-1)
-            # reward = jnp.squeeze(
-            #     nonparametric_entropy(data, knn_k, knn_avg, knn_log, knn_clip, knn_pow), axis=1
-            # )
-            _, representation = state["mpm"].apply_fn(
-                {"params": params["mpm"]}, obs, action, next_obs
-            )
-            reward = jnp.squeeze(
-                nonparametric_entropy(
-                    representation, knn_k, knn_avg, knn_log, knn_clip, knn_pow
-                ),
-                axis=1,
-            )
+        _, representation = state["icm"].apply_fn(
+            {"params": params["icm"]}, obs, action, next_obs
+        )
+        reward = jnp.squeeze(
+            nonparametric_entropy(
+                representation, knn_k, knn_avg, knn_log, knn_clip, knn_pow
+            ),
+            axis=1,
+        )
 
         loss = {}
 
@@ -209,12 +182,12 @@ def train_step(
 
         loss["qf"] = qf1_loss + qf2_loss
 
-        """ MPM loss """
-        mpm_loss, _ = state["mpm"].apply_fn(
-            {"params": params["mpm"]}, obs, action, next_obs
+        """forward backward prediction loss"""
+        icm_loss, _ = state["icm"].apply_fn(
+            {"params": params["icm"]}, obs, action, next_obs
         )
-        mpm_loss = mpm_loss.mean()
-        loss["mpm"] = mpm_loss
+        icm_loss = icm_loss.mean()
+        loss["icm"] = icm_loss
 
         return tuple(loss[key] for key in model_keys), locals()
 
@@ -246,7 +219,7 @@ def train_step(
             policy_loss=aux_values["policy_loss"],
             qf1_loss=aux_values["qf1_loss"],
             qf2_loss=aux_values["qf2_loss"],
-            mpm_loss=aux_values["mpm_loss"].mean(),
+            icm_loss=aux_values["icm_loss"].mean(),
             average_qf1=aux_values["q1_pred"].mean(),
             average_qf2=aux_values["q2_pred"].mean(),
             average_target_q=aux_values["target_q_values"].mean(),

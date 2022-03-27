@@ -1,4 +1,4 @@
 #!/bin/bash
 
-black *.py
-isort *.py
+black APTv2/*.py
+isort APTv2/*.py

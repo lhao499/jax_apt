@@ -5,36 +5,12 @@ import distrax
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
+from ml_collections import ConfigDict
 
-from jax_utils import extend_and_repeat
-
-
-def update_target_network(main_params, target_params, tau):
-    return jax.tree_multimap(
-        lambda x, y: tau * x + (1.0 - tau) * y, main_params, target_params
-    )
+from .utils import extend_and_repeat
 
 
-def multiple_action_q_function(forward):
-    # Forward the q function with multiple actions on each state, to be used as a decorator
-    def wrapped(self, observations, actions, **kwargs):
-        multiple_actions = False
-        batch_size = observations.shape[0]
-        if actions.ndim == 3 and observations.ndim == 2:
-            multiple_actions = True
-            observations = extend_and_repeat(observations, 1, actions.shape[1]).reshape(
-                -1, observations.shape[-1]
-            )
-            actions = actions.reshape(-1, actions.shape[-1])
-        q_values = forward(self, observations, actions, **kwargs)
-        if multiple_actions:
-            q_values = q_values.reshape(batch_size, -1)
-        return q_values
-
-    return wrapped
-
-
-class FullyConnectedNetwork(nn.Module):
+class MLP(nn.Module):
     output_dim: int
     arch: str = "256-256"
 
@@ -49,7 +25,7 @@ class FullyConnectedNetwork(nn.Module):
         return output
 
 
-class DoubleCriticFC(nn.Module):
+class TwinMLP(nn.Module):
     arch: str = "256-256"
     num_qf: int = 2
 
@@ -57,7 +33,7 @@ class DoubleCriticFC(nn.Module):
     def __call__(self, observations, actions):
         x = jnp.concatenate([observations, actions], -1)
         vmap_fc = nn.vmap(
-            FullyConnectedNetwork,
+            MLP,
             variable_axes={"params": 0},
             split_rngs={"params": True},
             in_axes=None,
@@ -68,29 +44,39 @@ class DoubleCriticFC(nn.Module):
         return qs
 
 
-class DoubleCritic(nn.Module):
-    arch: str = "256-256"
-    obs_type: str = "states"
+class Critic(nn.Module):
+    config_updates: ... = None
     cnn_features: str = "32-32-32-32"
     cnn_strides: str = "2-1-1-1"
     cnn_padding: str = "VALID"
-    latent_dim: int = 50
+
+    @staticmethod
+    @nn.nowrap
+    def get_default_config(updates=None):
+        config = ConfigDict()
+        config.arch = "256-256"
+        config.obs_type = "states"
+        config.latent_dim = 50
+
+        if updates is not None:
+            config.update(ConfigDict(updates).copy_and_resolve_references())
+        return config
 
     def setup(self):
-        if self.obs_type == "states":
-            self.encoder = Identity(name="Encoder")
+        self.config = self.get_default_config(self.config_updates)
+
+        if self.config.obs_type == "states":
+            self.encoder = Identity()
             self.projection = Identity()
-        elif self.obs_type == "pixels":
+        else:
             self.encoder = Encoder(
                 tuple(map(int, self.cnn_features.split("-"))),
                 tuple(map(int, self.cnn_strides.split("-"))),
                 self.cnn_padding,
-                name="Encoder",
             )
-            self.projection = Projection(self.latent_dim)
-        else:
-            raise NotImplementedError
-        self.fc = DoubleCriticFC(arch=self.arch)
+            self.projection = Projection(self.config.latent_dim)
+
+        self.fc = TwinMLP(arch=self.config.arch)
 
     def __call__(self, observations, actions):
         x = self.encoder(observations)
@@ -99,34 +85,44 @@ class DoubleCritic(nn.Module):
         return jnp.squeeze(x, -1)
 
 
-class TanhGaussianPolicy(nn.Module):
-    action_dim: int
-    arch: str = "256-256"
-    obs_type: str = "states"
-    expl_noise: float = 0.1
-    policy_noise: float = 0.2
-    clip_noise: float = 0.5
-    cnn_features: Sequence[int] = (32, 32, 32, 32)
-    cnn_strides: Sequence[int] = (2, 1, 1, 1)
+class Policy(nn.Module):
+    config_updates: ... = None
+    action_dim: int = None
+    cnn_features: str = "32-32-32-32"
+    cnn_strides: str = "2-1-1-1"
     cnn_padding: str = "VALID"
-    latent_dim: int = 50
+
+    @staticmethod
+    @nn.nowrap
+    def get_default_config(updates=None):
+        config = ConfigDict()
+        config.arch = "256-256"
+        config.obs_type = "states"
+        config.latent_dim = 50
+
+        config.expl_noise = 0.1
+        config.policy_noise = 0.2
+        config.clip_noise = 0.5
+
+        if updates is not None:
+            config.update(ConfigDict(updates).copy_and_resolve_references())
+        return config
 
     def setup(self):
-        if self.obs_type == "states":
-            self.encoder = Identity(name="Encoder")
+        self.config = self.get_default_config(self.config_updates)
+
+        if self.config.obs_type == "states":
+            self.encoder = Identity()
             self.projection = Identity()
-        elif self.obs_type == "pixels":
+        else:
             self.encoder = Encoder(
                 tuple(map(int, self.cnn_features.split("-"))),
                 tuple(map(int, self.cnn_strides.split("-"))),
                 self.cnn_padding,
-                name="Encoder",
             )
-            self.projection = Projection(self.latent_dim)
-        else:
-            raise NotImplementedError
+            self.projection = Projection(self.config.latent_dim)
 
-        self.fc = FullyConnectedNetwork(output_dim=self.action_dim, arch=self.arch)
+        self.fc = MLP(output_dim=self.action_dim, arch=self.config.arch)
 
     def __call__(self, rng, observations, deterministic=False, clip=False):
         x = self.encoder(observations)
@@ -137,77 +133,66 @@ class TanhGaussianPolicy(nn.Module):
         if deterministic:
             return actions
         if clip:
-            noise = jax.random.normal(rng, shape=(self.action_dim,)) * self.policy_noise
-            noise = noise.clip(-self.clip_noise, self.clip_noise)
-            actions = actions + noise
-            actions = jnp.tanh(actions)
-            return actions
-        else:
-            noise = jax.random.normal(rng, shape=(self.action_dim,)) * self.expl_noise
-            actions = actions + noise
-            actions = jnp.tanh(actions)
-            return actions
-
-
-class SamplerPolicy(object):
-    def __init__(self, policy, params):
-        self.policy = policy
-        self.params = params
-
-    def update_params(self, params):
-        self.params = params
-        return self
-
-    @partial(jax.jit, static_argnames=("self", "deterministic"))
-    def act(self, params, rng, observations, deterministic):
-        return self.policy.apply(params, rng, observations, deterministic, clip=True)
-
-    def __call__(self, rng, observations, deterministic=False, random=False):
-        observations = jax.device_put(observations)
-        if random:
-            actions = jax.random.uniform(
-                rng, (1, self.policy.action_dim), minval=-1, maxval=1.0
+            noise = (
+                jax.random.normal(rng, shape=(self.action_dim,))
+                * self.config.policy_noise
             )
+            noise = noise.clip(-self.config.clip_noise, self.config.clip_noise)
+            actions = actions + noise
+            actions = jnp.tanh(actions)
+            return actions
         else:
-            actions = self.act(self.params, rng, observations, deterministic)
-            actions = jnp.tanh(actions)  # sampler actions always [-1, 1]
+            noise = (
+                jax.random.normal(rng, shape=(self.action_dim,))
+                * self.config.expl_noise
+            )
+            actions = actions + noise
+            actions = jnp.tanh(actions)
+            return actions
 
-        assert jnp.all(jnp.isfinite(actions))
-        return jax.device_get(actions)
 
-
-class MPM(nn.Module):
-    action_dim: int
-    arch: str = "256-256"
-    obs_type: str = "states"
-    representation_dim: int = 256
+class ICM(nn.Module):
+    config_updates: ... = None
+    action_dim: int = None
     cnn_features: str = "32-32-32-32"
     cnn_strides: str = "2-1-1-1"
     cnn_padding: str = "VALID"
 
+    @staticmethod
+    @nn.nowrap
+    def get_default_config(updates=None):
+        config = ConfigDict()
+        config.arch = "256-256"
+        config.obs_type = "states"
+        config.icm_dim = 256
+
+        if updates is not None:
+            config.update(ConfigDict(updates).copy_and_resolve_references())
+        return config
+
     def setup(self):
-        if self.obs_type == "states":
-            self.encoder = Identity(name="Encoder")
-        elif self.obs_type == "pixels":
+        self.config = self.get_default_config(self.config_updates)
+
+        if self.config.obs_type == "states":
+            self.encoder = Identity()
+            self.projection = Identity()
+        else:
             self.encoder = Encoder(
                 tuple(map(int, self.cnn_features.split("-"))),
                 tuple(map(int, self.cnn_strides.split("-"))),
                 self.cnn_padding,
-                name="Encoder",
             )
-        else:
-            raise NotImplementedError
+            self.projection = Projection(self.config.latent_dim)
+
         self.trunk = [
-            nn.Dense(self.representation_dim),
-            nn.LayerNorm(self.representation_dim),
+            nn.Dense(self.config.icm_dim),
+            nn.LayerNorm(self.config.icm_dim),
         ]
 
-        self.forward_net = [
-            FullyConnectedNetwork(output_dim=self.representation_dim, arch=self.arch)
-        ]
+        self.forward_net = [MLP(output_dim=self.config.icm_dim, arch=self.config.arch)]
 
         self.backward_net = [
-            FullyConnectedNetwork(output_dim=self.action_dim, arch=self.arch),
+            MLP(output_dim=self.action_dim, arch=self.config.arch),
             lambda x: nn.tanh(x),
         ]
 
@@ -233,6 +218,33 @@ class MPM(nn.Module):
         prediction_error = forward_error + backward_error
         representation = jax.lax.stop_gradient(next_obs_hat)
         return prediction_error, representation
+
+
+class SamplerPolicy(object):
+    def __init__(self, policy, params):
+        self.policy = policy
+        self.params = params
+
+    def update_params(self, params):
+        self.params = params
+        return self
+
+    @partial(jax.jit, static_argnames=("self", "deterministic"))
+    def act(self, params, rng, observations, deterministic):
+        return self.policy.apply(params, rng, observations, deterministic, clip=True)
+
+    def __call__(self, rng, observations, deterministic=False, random=False):
+        observations = jax.device_put(observations)
+        if random:
+            actions = jax.random.uniform(
+                rng, (1, self.policy.action_dim), minval=-1, maxval=1.0
+            )
+        else:
+            actions = self.act(self.params, rng, observations, deterministic)
+            actions = jnp.tanh(actions)
+
+        assert jnp.all(jnp.isfinite(actions))
+        return jax.device_get(actions)
 
 
 class Encoder(nn.Module):
@@ -279,35 +291,26 @@ class Projection(nn.Module):
         return x
 
 
-class Sequential(nn.Module):
-    layers: Sequence[Type[nn.Module]]
-
-    @nn.compact
-    def __call__(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return x
+def update_target_network(main_params, target_params, tau):
+    return jax.tree_multimap(
+        lambda x, y: tau * x + (1.0 - tau) * y, main_params, target_params
+    )
 
 
-class Residual(nn.Module):
-    layers: Sequence[Type[nn.Module]]
+def multiple_action_q_function(forward):
+    # Forward the q function with multiple actions on each state, to be used as a decorator
+    def wrapped(self, observations, actions, **kwargs):
+        multiple_actions = False
+        batch_size = observations.shape[0]
+        if actions.ndim == 3 and observations.ndim == 2:
+            multiple_actions = True
+            observations = extend_and_repeat(observations, 1, actions.shape[1]).reshape(
+                -1, observations.shape[-1]
+            )
+            actions = actions.reshape(-1, actions.shape[-1])
+        q_values = forward(self, observations, actions, **kwargs)
+        if multiple_actions:
+            q_values = q_values.reshape(batch_size, -1)
+        return q_values
 
-    @nn.compact
-    def __call__(self, x):
-        for layer in self.layers:
-            x = layer(x) + x
-        return x
-
-
-class PreNorm(nn.Module):
-    layers: Sequence[Type[nn.Module]]
-
-    def setup(self):
-        self.norm = nn.LayerNorm()
-
-    @nn.compact
-    def __call__(self, x):
-        for layer in self.layers:
-            x = self.norm(x)
-            x = layer(x)
-        return x
+    return wrapped
