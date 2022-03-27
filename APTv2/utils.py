@@ -111,46 +111,6 @@ def batched_random_crop(key, imgs, padding=4):
     return jax.vmap(random_crop, (0, 0, None))(keys, imgs, padding)
 
 
-def dist_fn(x, y, knn_pow):
-    return jnp.sum(jnp.linalg.norm(x - y, ord=knn_pow))
-
-
-@partial(jax.jit, static_argnums=2)
-def distance_fn(a, b, knn_pow):
-    return jax.vmap(jax.vmap(partial(dist_fn, knn_pow=knn_pow), (None, 0)), (0, None))(
-        a, b
-    )
-
-
-@partial(jax.jit, static_argnums=list(range(1, 6)))
-def nonparametric_entropy(
-    data, knn_k=512, knn_avg=True, knn_log=False, knn_clip=0.0, knn_pow=2
-):
-    if knn_pow == -1:
-        knn_pow = data.shape[1]
-    knn_k = min(knn_k, data.shape[0])
-    neg_distance = -distance_fn(data, data, knn_pow)
-    neg_distance, indices = jax.lax.top_k(neg_distance, k=knn_k)
-    distance = -neg_distance
-    if knn_avg:  # averaging
-        entropy = distance.reshape(-1, 1)  # (b * k, 1)
-        if knn_clip > 0.0:
-            entropy = jnp.maximum(entropy - knn_clip, jnp.zeros_like(entropy))
-        entropy = entropy.reshape((data.shape[0], knn_k))  # (b, k)
-        entropy = entropy.mean(axis=1, keepdims=True)  # (b, 1)
-    else:
-        distance = jax.lax.sort(distance, dimension=-1)
-        entropy = distance[:, -1].reshape(-1, 1)  # (b, 1)
-        if knn_clip > 0.0:
-            entropy = jnp.maximum(entropy - knn_clip, jnp.zeros_like(entropy))
-
-    if knn_log:  # rescaling
-        reward = jnp.log(entropy + 1.0)
-    else:
-        reward = entropy
-    return reward
-
-
 class Timer(object):
     def __init__(self):
         self._time = None
@@ -305,34 +265,19 @@ def schedule(schdl, step):
     raise NotImplementedError(schdl)
 
 
-def load_checkpoint(checkpoint_path):
-    try:
-        with open(checkpoint_path, "rb") as checkpoint_file:
-            checkpoint_data = pickle.load(checkpoint_file)
-            logging.info(
-                "Loading checkpoint from %s, saved at step %d",
-                checkpoint_path,
-                checkpoint_data["step"],
-            )
-            return checkpoint_data
-    except FileNotFoundError:
-        return None
-
-
 class WandBLogger(object):
     @staticmethod
     def get_default_config(updates=None):
         config = ConfigDict()
         config.online = False
-        config.prefix = "M3AE"
-        config.project = "m3ae"
-        config.output_dir = "/tmp/m3ae"
+        config.prefix = "APTv2"
+        config.project = "aptv2"
+        config.output_dir = "/tmp/aptv2"
         config.gcs_output_dir = ""
         config.random_delay = 0.0
         config.experiment_id = config_dict.placeholder(str)
         config.anonymous = config_dict.placeholder(str)
         config.notes = config_dict.placeholder(str)
-        config.entity = "m3ae"
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
@@ -381,7 +326,6 @@ class WandBLogger(object):
                 id=self.config.experiment_id,
                 anonymous=self.config.anonymous,
                 notes=self.config.notes,
-                entity=self.config.entity,
                 settings=wandb.Settings(
                     start_method="thread",
                     _disable_stats=True,
@@ -416,3 +360,29 @@ class WandBLogger(object):
     @property
     def output_dir(self):
         return Path(self.config.output_dir)
+
+
+def update_target_network(main_params, target_params, tau):
+    return jax.tree_multimap(
+        lambda x, y: tau * x + (1.0 - tau) * y, main_params, target_params
+    )
+
+
+def load_pickle(path):
+    if path.startswith("gs://"):
+        with gcsfs.GCSFileSystem().open(path) as fin:
+            data = pickle.load(fin)
+    else:
+        with open(path, "rb") as fin:
+            data = pickle.load(fin)
+    return data
+
+
+def load_checkpoint(path):
+    data = load_pickle(path)
+    logging.info(
+        "Loading checkpoint from %s, saved at step %d",
+        path,
+        data["step"],
+    )
+    return data

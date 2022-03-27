@@ -14,14 +14,14 @@ from ml_collections import ConfigDict
 from torch.utils.data import IterableDataset
 
 
-class TrainDataset(IterableDataset):
+class UnlabelDataset(IterableDataset):
     @staticmethod
     def get_default_config(updates=None):
         config = ConfigDict()
         config.fetch_every = 1000
         config.max_size = int(1e12)
-        config.discount = 1
-        config.n_step = 1
+        config.discount = 0.99
+        config.n_step = 3
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
@@ -100,27 +100,25 @@ class TrainDataset(IterableDataset):
             yield self._sample()
 
 
-class TestDataset(IterableDataset):
+class RelabelDataset(IterableDataset):
     @staticmethod
     def get_default_config(updates=None):
         config = ConfigDict()
-        config.replay_dir = ""
         config.max_size = int(1e10)
-        config.n_worker = 0
-        config.discount = 1
-        config.n_step = 1
+        config.discount = 0.99
+        config.n_step = 3
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
         return config
 
-    def __init__(self, config, env, n_worker):
+    def __init__(self, config, env, n_worker, replay_dir):
         self.config = self.get_default_config(config)
         self._episode_fns = []
         self._episodes = dict()
         self._size = 0
         self._env = env
-        self._replay_dir = Path(self.config.replay_dir)
+        self._replay_dir = Path(replay_dir)
 
         self._n_worker = n_worker
         # use max_size_per_worker

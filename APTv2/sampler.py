@@ -16,7 +16,7 @@ class RolloutStorage(object):
         policy,
         n_trajs,
         deterministic=False,
-        replay_storage=None,
+        data_storage=None,
         random=False,
     ):
         r_traj = 0
@@ -31,8 +31,8 @@ class RolloutStorage(object):
                 phys = dict(physics=self._env._env.physics.state())
                 self._current_time_step = time_step
 
-                if replay_storage is not None:
-                    replay_storage.add(time_step, phys)
+                if data_storage is not None:
+                    data_storage.add(time_step, phys)
 
             while True:
                 self._traj_steps += 1
@@ -51,8 +51,8 @@ class RolloutStorage(object):
                 r_traj += time_step["reward"]
                 self._done = time_step.last()
 
-                if replay_storage is not None:
-                    replay_storage.add(time_step, phys)
+                if data_storage is not None:
+                    data_storage.add(time_step, phys)
 
                 if self._done:
                     break
@@ -66,7 +66,7 @@ class RolloutStorage(object):
         policy,
         n_steps,
         deterministic=False,
-        replay_storage=None,
+        data_storage=None,
         random=False,
     ):
         for _ in range(n_steps):
@@ -80,8 +80,8 @@ class RolloutStorage(object):
                 phys = dict(physics=self._env._env.physics.state())
                 self._current_time_step = time_step
 
-                if replay_storage is not None:
-                    replay_storage.add(time_step, phys)
+                if data_storage is not None:
+                    data_storage.add(time_step, phys)
 
             self._traj_steps += 1
             rng, split_rng = jax.random.split(rng)
@@ -98,8 +98,8 @@ class RolloutStorage(object):
             self._current_time_step = time_step
             self._done = time_step.last()
 
-            if replay_storage is not None:
-                replay_storage.add(time_step, phys)
+            if data_storage is not None:
+                data_storage.add(time_step, phys)
 
         data = dict()
         return data, rng

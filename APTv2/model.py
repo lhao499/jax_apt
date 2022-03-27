@@ -291,26 +291,20 @@ class Projection(nn.Module):
         return x
 
 
-def update_target_network(main_params, target_params, tau):
-    return jax.tree_multimap(
-        lambda x, y: tau * x + (1.0 - tau) * y, main_params, target_params
-    )
+# def multiple_action_q_function(forward):
+#     # Forward the q function with multiple actions on each state, to be used as a decorator
+#     def wrapped(self, observations, actions, **kwargs):
+#         multiple_actions = False
+#         batch_size = observations.shape[0]
+#         if actions.ndim == 3 and observations.ndim == 2:
+#             multiple_actions = True
+#             observations = extend_and_repeat(observations, 1, actions.shape[1]).reshape(
+#                 -1, observations.shape[-1]
+#             )
+#             actions = actions.reshape(-1, actions.shape[-1])
+#         q_values = forward(self, observations, actions, **kwargs)
+#         if multiple_actions:
+#             q_values = q_values.reshape(batch_size, -1)
+#         return q_values
 
-
-def multiple_action_q_function(forward):
-    # Forward the q function with multiple actions on each state, to be used as a decorator
-    def wrapped(self, observations, actions, **kwargs):
-        multiple_actions = False
-        batch_size = observations.shape[0]
-        if actions.ndim == 3 and observations.ndim == 2:
-            multiple_actions = True
-            observations = extend_and_repeat(observations, 1, actions.shape[1]).reshape(
-                -1, observations.shape[-1]
-            )
-            actions = actions.reshape(-1, actions.shape[-1])
-        q_values = forward(self, observations, actions, **kwargs)
-        if multiple_actions:
-            q_values = q_values.reshape(batch_size, -1)
-        return q_values
-
-    return wrapped
+#     return wrapped
