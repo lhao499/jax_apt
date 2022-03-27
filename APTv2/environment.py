@@ -15,10 +15,11 @@ import numpy as np
 import wandb
 from absl import logging
 from dm_env import specs
-from .dmc_env.dmc import make
 from ml_collections import ConfigDict
 from ml_collections.config_dict import config_dict
 from ml_collections.config_flags import config_flags
+
+from .dmc_env.dmc import make
 
 
 class Environment(object):

@@ -4,6 +4,7 @@ import random
 import traceback
 from collections import defaultdict
 from copy import copy
+from pathlib import Path
 from socket import gethostname
 
 import numpy as np
@@ -11,7 +12,6 @@ import torch
 from absl import logging
 from ml_collections import ConfigDict
 from torch.utils.data import IterableDataset
-from pathlib import Path
 
 
 class TrainDataset(IterableDataset):

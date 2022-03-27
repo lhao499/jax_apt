@@ -1,3 +1,4 @@
+import os
 import pprint
 import random
 import re
@@ -12,6 +13,7 @@ from socket import gethostname
 import absl.flags
 import cloudpickle as pickle
 import flax
+import gcsfs
 import imageio
 import jax
 import jax.numpy as jnp
@@ -22,8 +24,7 @@ from flax import jax_utils
 from ml_collections import ConfigDict
 from ml_collections.config_dict import config_dict
 from ml_collections.config_flags import config_flags
-import os
-import gcsfs
+
 
 class JaxRNG(object):
     def __init__(self, seed):
@@ -163,6 +164,7 @@ class Timer(object):
 
     def __call__(self):
         return self._time
+
 
 class VideoRecorder:
     def __init__(

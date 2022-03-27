@@ -26,6 +26,8 @@ if __name__ == "__main__":
     from flax import jax_utils
     from tqdm.auto import tqdm, trange
 
+    torch.multiprocessing.set_start_method("spawn")
+
     from .environment import Environment
     from .model import ICM, Critic, Policy, SamplerPolicy
     from .replay_buffer import TestDataset, TrainDataset
@@ -60,7 +62,6 @@ if __name__ == "__main__":
     )
 
 
-
 def main(argv):
     FLAGS = absl.flags.FLAGS
     variant = get_user_flags(FLAGS, FLAGS_DEF)
@@ -81,29 +82,29 @@ def main(argv):
     )
     replay_dir = Path(FLAGS.replay_dir) / str(uuid.uuid4().hex)
     replay_dir.mkdir(parents=True, exist_ok=True)
-    replay = TrainDataset(FLAGS.replay, data_specs, phys_specs, replay_dir, FLAGS.dataloader_n_workers)
+    replay = TrainDataset(
+        FLAGS.replay, data_specs, phys_specs, replay_dir, FLAGS.dataloader_n_workers
+    )
 
     def collect_random_data(replay, env):
         replay_storage = replay._storage
         done = True
-        for _ in trange(5000, ncols=0, desc="Collecting random data"):
+        for _ in trange(
+            FLAGS.dataloader_n_workers * int(1e3),
+            ncols=0,
+            desc="Collecting random data",
+        ):
             if done:
                 time_step = env.reset()
                 replay_storage.add(time_step, dict(physics=env._env.physics.state()))
-            a = np.random.uniform(size=(action_dim,), low=-1, high=1.0).astype(np.float32)
+            a = np.random.uniform(size=(action_dim,), low=-1, high=1.0).astype(
+                np.float32
+            )
             time_step = env.step(a)
             done = time_step.last()
             replay_storage.add(time_step, dict(physics=env._env.physics.state()))
 
     collect_random_data(replay, train_env)
-
-    def worker_init_fn(worker_id):
-        seed = np.random.get_state()[1][0] + worker_id
-        np.random.seed(seed)
-        random.seed(seed)
-
-    def collate_fn(batch):
-        return {k: np.stack([b[k] for b in batch], axis=0) for k in batch[0].keys()}
 
     replay_loader = torch.utils.data.DataLoader(
         replay,
@@ -112,8 +113,6 @@ def main(argv):
         prefetch_factor=2,
         persistent_workers=True,
         drop_last=True,
-        worker_init_fn=worker_init_fn,
-        collate_fn=collate_fn,
     )
 
     for _ in zip(
@@ -157,31 +156,30 @@ def main(argv):
         action_dim,
         obs_type,
     )
-    sampler_policy = SamplerPolicy(
-        policy, {"params": state["policy"].params}
-    )
+    sampler_policy = SamplerPolicy(policy, {"params": state["policy"].params})
 
     train_sampler.sample_traj(
         next_rng(),
-        sampler_policy.update_params(
-            {"params": state["policy"].params}
-        ),
-        max(FLAGS.dataloader_n_workers * 2, 10),
+        sampler_policy.update_params({"params": state["policy"].params}),
+        max(FLAGS.dataloader_n_workers, 10),
         deterministic=False,
         replay_storage=replay._storage,
         random=True,
     )
 
-    def prepare_data(xs):
+    def generate_batch(it):
 
-        def _prepare(x):
-            return x.reshape((jax.local_device_count(), -1) + x.shape[1:])
+        def prepare_data(xs):
+            def _prepare(x):
+                return x.reshape((jax.local_device_count(), -1) + x.shape[1:])
+            return jax.tree_map(_prepare, xs)
 
-        return jax.tree_map(_prepare, xs)
+        while True:
+            for batch in it:
+                batch = {k: v.numpy() for k, v in batch.items()}
+                yield prepare_data(batch)
 
-    replay_iter = iter(
-        jax_utils.prefetch_to_device(map(prepare_data, replay_loader), 2)
-    )
+    replay_iter = iter(jax_utils.prefetch_to_device(generate_batch(replay_loader), 2))
 
     sharded_rng = jax.device_put_sharded(next_rng(n_devices), jax_devices)
 
@@ -198,8 +196,6 @@ def main(argv):
     state = sync_state_fn(state)
 
     for step in trange(FLAGS.n_total_step, ncols=0):
-        metrics = {}
-
         for _ in range(FLAGS.n_train_step_per_iter):
             batch = next(replay_iter)
             state, sharded_rng, train_metrics = td3.train(state, batch, sharded_rng)
@@ -232,11 +228,11 @@ def main(argv):
             )
 
             video_recoder.log_to_wandb()
-            metrics["average_return"] = data["r_traj"]
-            metrics["env_steps"] = len(replay._storage)
-            metrics["step"] = step
-            metrics.update(prefix_metrics(train_metrics, "td3"))
-            logger.log(metrics)
+            log_metrics["average_return"] = data["r_traj"]
+            log_metrics["env_steps"] = len(replay._storage)
+            log_metrics = prefix_metrics(log_metrics, "test")
+            log_metrics["step"] = step
+            logger.log(log_metrics)
 
         if FLAGS.save_model_freq > 0 and step % FLAGS.save_model_freq == 0:
             state = sync_state_fn(state)
