@@ -27,7 +27,7 @@ if __name__ == "__main__":
     from flax.training.train_state import TrainState
     from tqdm.auto import tqdm, trange
 
-    torch.multiprocessing.set_start_method("spawn")
+    torch.multiprocessing.set_start_method("fork")
 
     from .data import RelabelDataset
     from .environment import Environment
@@ -258,7 +258,6 @@ def main(argv):
 
     video_recoder = VideoRecorder(root_dir=logger.output_dir / "video")
 
-    train_sampler = RolloutStorage(train_env, FLAGS.max_traj_length, None)
     test_sampler = RolloutStorage(test_env, FLAGS.max_traj_length, video_recoder)
 
     policy = Policy(FLAGS.policy, action_dim)

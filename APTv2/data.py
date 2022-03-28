@@ -36,7 +36,6 @@ class UnlabelDataset(IterableDataset):
         self._size = 0
 
         self._n_worker = n_worker
-        # use max_size_per_worker
         self._max_size = self.config.max_size / self._n_worker
 
         self._discount = self.config.discount
@@ -121,34 +120,21 @@ class RelabelDataset(IterableDataset):
         self._replay_dir = Path(replay_dir)
 
         self._n_worker = n_worker
-        # use max_size_per_worker
         self._max_size = self.config.max_size / self._n_worker
 
         self._discount = self.config.discount
         self._nstep = self.config.n_step
 
-        self._loaded = False
-        self.return_stat = []
-        logging.info(f"loading data from {self._replay_dir}")
-        if not self._loaded:
-            self._load()
-            self._loaded = True
-        if self._loaded:
-            self._stat()
-            logging.info(f"dataset size is {self._size}")
-            logging.info(
-                f"dataset return max {self.max_return:.5f}. min {self.min_return:.5f}. mean {self.mean_return:.5f} median {self.mean_return:.5f}"
-            )
+        self._load()
+        self._stat()
 
     def _stat(self):
         returns = [np.sum(episode["reward"]) for episode in self._episodes.values()]
-        self.max_return = max(returns)
-        self.min_return = min(returns)
-        self.mean_return = np.mean(returns)
-        self.median_return = np.median(returns)
+        logging.info(f"max {max(returns):.5f}. min {min(returns):.5f}. mean {np.mean(returns):.5f} median {np.median(returns):.5f}")
+        logging.info(f"max size {self._max_size}. size {self._size}. worker number {self._n_worker}. episode number {len(returns)}")
 
     def _load(self, relable=True):
-        logging.info("Labeling data...")
+        logging.info(f"Labeling data... from {self._replay_dir}")
         try:
             worker_id = torch.utils.data.get_worker_info().id
         except:
@@ -168,9 +154,6 @@ class RelabelDataset(IterableDataset):
             self._size += episode_len(episode)
 
     def _sample_episode(self):
-        if not self._loaded:
-            self._load()
-            self._loaded = True
         eps_fn = random.choice(self._episode_fns)
         return self._episodes[eps_fn]
 
