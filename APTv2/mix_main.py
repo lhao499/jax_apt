@@ -28,16 +28,17 @@ if __name__ == "__main__":
     from flax.training.train_state import TrainState
     from tqdm.auto import tqdm, trange
 
-    torch.multiprocessing.set_start_method("spawn")
+    torch.multiprocessing.set_start_method("fork")
 
-    from .data import UnlabelDataset
+    from .data import LearnLabelDataset
     from .environment import Environment
-    from .model import ICM, Critic, Policy, SamplerPolicy
+    from .model import Critic, Policy, SamplerPolicy, Reward
     from .sampler import RolloutStorage
     from .utils import (VideoRecorder, WandBLogger, batched_random_crop,
                         define_flags_with_default, get_metrics, get_user_flags,
-                        mse_loss, next_rng, prefix_metrics, set_random_seed,
-                        update_target_network, value_and_multi_grad)
+                        load_checkpoint, load_pickle, mse_loss, next_rng,
+                        prefix_metrics, set_random_seed, update_target_network,
+                        value_and_multi_grad)
 
     FLAGS_DEF = define_flags_with_default(
         seed=42,
@@ -52,16 +53,18 @@ if __name__ == "__main__":
         n_test_traj=5,
         max_traj_length=1000,
         logging=WandBLogger.get_default_config(),
-        data=UnlabelDataset.get_default_config(),
+        data=LearnLabelDataset.get_default_config(),
         env=Environment.get_default_config(),
         policy=Policy.get_default_config(),
         critic=Critic.get_default_config(),
-        icm=ICM.get_default_config(),
+        reward=Reward.get_default_config(),
         online=False,
         log_all_worker=False,
+        load_data_dir="",
+        load_model_dir="",
         policy_lr=3e-4,
         critic_lr=3e-4,
-        icm_lr=3e-4,
+        reward_lr=3e-4,
         soft_target_update_rate=5e-3,
         nstep=3,
         knn_k=3,
@@ -75,9 +78,7 @@ def create_train_step(
     action_dim,
     policy_lr,
     critic_lr,
-    icm_lr,
-    knn_k,
-    knn_avg,
+    reward_lr,
     soft_target_update_rate,
     model_keys,
 ):
@@ -88,27 +89,7 @@ def create_train_step(
         preprocess = lambda _, x: x
         copy_encoder = False
 
-    def dist_fn(x, y, ord):
-        return jnp.sum(jnp.linalg.norm(x - y, ord))
-
-    def distance_fn(a, b):
-        return jax.vmap(jax.vmap(partial(dist_fn, ord=2), (None, 0)), (0, None))(a, b)
-
-    def APTEnt(data):
-        k = min(knn_k, data.shape[0])
-        neg_distance = -distance_fn(data, data)
-        neg_distance, _ = jax.lax.top_k(neg_distance, k)
-        distance = -neg_distance
-        if knn_avg:
-            entropy = distance.reshape(-1, 1)  # (b * k, 1)
-            entropy = entropy.reshape((data.shape[0], k))  # (b, k)
-            entropy = entropy.mean(axis=1, keepdims=True)  # (b, 1)
-        else:
-            distance = jax.lax.sort(distance, dimension=-1)
-            entropy = distance[:, -1].reshape(-1, 1)  # (b, 1)
-        return entropy
-
-    def create_state(policy, qf, icm):
+    def create_state(policy, qf, reward, load_model_dir):
         state = {}
 
         dummy_obs = jnp.zeros((10, *observation_dim))
@@ -116,7 +97,25 @@ def create_train_step(
 
         policy_params = policy.init(next_rng(), next_rng(), dummy_obs)["params"]
         qf_params = qf.init(next_rng(), dummy_obs, dummy_action)["params"]
-        icm_params = icm.init(next_rng(), dummy_obs, dummy_action, dummy_obs)["params"]
+        reward_params = reward.init(next_rng(), dummy_obs, dummy_action)["params"]
+
+        if load_model_dir != "":
+            """
+            Load pretrained policy and critic
+            """
+            checkpoint_state = load_checkpoint(load_model_dir)["state"]
+
+            policy_params = flax.core.unfreeze(policy_params)
+            for key in policy_params:
+                assert key in checkpoint_state["policy"].params.keys(), f"pretrained model miss key={key}"
+                policy_params[key] = checkpoint_state["policy"].params[key]
+            policy_params = flax.core.freeze(policy_params)
+
+            qf_params = flax.core.unfreeze(qf_params)
+            for key in qf_params:
+                assert key in checkpoint_state["qf"].params.keys(), f"pretrained model miss key={key}"
+                qf_params[key] = checkpoint_state["qf"].params[key]
+            qf_params = flax.core.freeze(qf_params)
 
         state["policy"] = TrainState.create(
             params=policy_params,
@@ -129,11 +128,12 @@ def create_train_step(
             apply_fn=qf.apply,
         )
         target_qf_params = deepcopy({"qf": qf_params})
-        state["icm"] = TrainState.create(
-            params=icm_params,
-            tx=optax.adam(icm_lr),
-            apply_fn=icm.apply,
+        state["reward"] = TrainState.create(
+            params=reward_params,
+            tx=optax.adam(reward_lr),
+            apply_fn=reward.apply,
         )
+
         return state, target_qf_params
 
     def loss_fn(params, state, batch, rng, target_qf_params):
@@ -142,13 +142,17 @@ def create_train_step(
         action = batch["action"]
         discount = jnp.squeeze(batch["discount"], axis=1)
         next_obs = preprocess(rng, batch["next_obs"])
-
-        _, embedding = state["icm"].apply_fn(
-            {"params": params["icm"]}, obs, action, next_obs
-        )
-        reward = jnp.squeeze(APTEnt(embedding), axis=1)
+        reward = batch["reward"]
 
         loss = {}
+
+        """ Reward loss """
+        reward_pred = state["reward"].apply_fn(
+            {"params": params["reward"]}, obs, action
+        )
+        reward_loss = mse_loss(reward_pred, reward)
+
+        loss["reward"] = reward_loss
 
         """ Policy loss """
         rng, split_rng = jax.random.split(rng)
@@ -180,18 +184,12 @@ def create_train_step(
         )
         target_q_values = jax.lax.min(target_q1, target_q2)
 
-        q_target = jax.lax.stop_gradient(reward + discount * target_q_values)
+        """ Use reward prediction to train"""
+        q_target = jax.lax.stop_gradient(reward_pred + discount * target_q_values)
         qf1_loss = mse_loss(q1_pred, q_target)
         qf2_loss = mse_loss(q2_pred, q_target)
 
         loss["qf"] = qf1_loss + qf2_loss
-
-        """forward backward prediction loss"""
-        icm_loss, _ = state["icm"].apply_fn(
-            {"params": params["icm"]}, obs, action, next_obs
-        )
-        icm_loss = icm_loss.mean()
-        loss["icm"] = icm_loss
 
         return tuple(loss[key] for key in model_keys), locals()
 
@@ -222,17 +220,25 @@ def create_train_step(
                 {"Encoder": state["qf"].params["Encoder"]}
             )
             state["policy"] = state["policy"].replace(params=new_policy_params)
+            """
+            Copy encoder from critic to reward
+            """
+            new_reward_params = state["reward"].params.copy(
+                {"Encoder": state["qf"].params["Encoder"]}
+            )
+            state["reward"] = state["reward"].replace(params=new_reward_params)
 
         metrics = jax.lax.pmean(
             dict(
                 policy_loss=aux_values["policy_loss"],
                 qf1_loss=aux_values["qf1_loss"],
                 qf2_loss=aux_values["qf2_loss"],
-                icm_loss=aux_values["icm_loss"].mean(),
+                reward_loss=aux_values["reward_loss"],
                 average_qf1=aux_values["q1_pred"].mean(),
                 average_qf2=aux_values["q2_pred"].mean(),
                 average_target_q=aux_values["target_q_values"].mean(),
                 train_reward=aux_values["reward"].mean(),
+                train_reward_pred=aux_values["reward_pred"].mean(),
             ),
             axis_name="batch",
         )
@@ -262,29 +268,9 @@ def main(argv):
     )
     data_dir = Path(FLAGS.logging.output_dir) / f"data_{str(uuid.uuid4().hex)}"
     data_dir.mkdir(parents=True, exist_ok=True)
-    dataset = UnlabelDataset(
-        FLAGS.data, data_specs, phys_specs, data_dir, FLAGS.dataloader_n_workers
+    dataset = LearnLabelDataset(
+        FLAGS.data, data_specs, phys_specs, data_dir, FLAGS.dataloader_n_workers, FLAGS.load_data_dir
     )
-
-    def collect_random_data(dataset, env):
-        data_storage = dataset._storage
-        done = True
-        for _ in trange(
-            FLAGS.dataloader_n_workers * int(1e3),
-            ncols=0,
-            desc="Collecting random data",
-        ):
-            if done:
-                time_step = env.reset()
-                data_storage.add(time_step, dict(physics=env._env.physics.state()))
-            a = np.random.uniform(size=(action_dim,), low=-1, high=1.0).astype(
-                np.float32
-            )
-            time_step = env.step(a)
-            done = time_step.last()
-            data_storage.add(time_step, dict(physics=env._env.physics.state()))
-
-    collect_random_data(dataset, train_env)
 
     data_loader = torch.utils.data.DataLoader(
         dataset,
@@ -324,7 +310,7 @@ def main(argv):
 
     policy = Policy(FLAGS.policy, action_dim)
     critic = Critic(FLAGS.critic)
-    icm = ICM(FLAGS.icm, action_dim)
+    reward = Reward(FLAGS.reward)
 
     create_state, train_step_fn = create_train_step(
         obs_type,
@@ -332,13 +318,12 @@ def main(argv):
         action_dim,
         FLAGS.policy_lr,
         FLAGS.critic_lr,
-        FLAGS.icm_lr,
-        FLAGS.knn_k,
-        FLAGS.knn_avg,
+        FLAGS.reward_lr,
         FLAGS.soft_target_update_rate,
-        model_keys=tuple(["policy", "qf", "icm"]),
+        model_keys=tuple(["policy", "qf", "reward"]),
     )
-    state, target_qf_params = create_state(policy, critic, icm)
+    state, target_qf_params = create_state(policy, critic, reward, FLAGS.load_model_dir)
+
     sampler_policy = SamplerPolicy(policy, {"params": state["policy"].params})
 
     train_sampler.sample_traj(

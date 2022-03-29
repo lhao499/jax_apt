@@ -41,7 +41,7 @@ if __name__ == "__main__":
 
     FLAGS_DEF = define_flags_with_default(
         seed=42,
-        n_total_step=2000000,
+        n_total_iter=2000000,
         n_train_step_per_iter=1,
         batch_size=256,
         dataloader_n_workers=16,
@@ -75,7 +75,7 @@ def create_train_step(
     policy_lr,
     critic_lr,
     soft_target_update_rate,
-    model_keys=tuple(["policy", "qf"]),
+    model_keys,
 ):
     if obs_type != "states":
         preprocess = batched_random_crop
@@ -94,6 +94,9 @@ def create_train_step(
         qf_params = qf.init(next_rng(), dummy_obs, dummy_action)["params"]
 
         if load_model_dir != "":
+            """
+            Load pretrained policy and critic
+            """
             checkpoint_state = load_checkpoint(load_model_dir)["state"]
 
             policy_params = flax.core.unfreeze(policy_params)
@@ -132,6 +135,7 @@ def create_train_step(
 
         loss = {}
 
+        """ Policy loss """
         rng, split_rng = jax.random.split(rng)
         new_action = state["policy"].apply_fn(
             {"params": params["policy"]},
@@ -139,8 +143,6 @@ def create_train_step(
             obs,
             deterministic=True,
         )
-
-        """ Policy loss """
         q_new_action, _ = state["qf"].apply_fn(
             {"params": params["qf"]}, obs, new_action
         )
@@ -191,6 +193,9 @@ def create_train_step(
         )
 
         if copy_encoder:
+            """
+            Copy encoder from critic to actor
+            """
             new_policy_params = state["policy"].params.copy(
                 {"Encoder": state["qf"].params["Encoder"]}
             )
@@ -305,7 +310,7 @@ def main(argv):
     target_qf_params = jax_utils.replicate(target_qf_params, jax_devices)
     state = sync_state_fn(state)
 
-    for step in trange(FLAGS.n_total_step, ncols=0):
+    for step in trange(FLAGS.n_total_iter, ncols=0):
         for _ in range(FLAGS.n_train_step_per_iter):
             batch = next(data_iter)
             state, train_metrics, sharded_rng, target_qf_params = train_step_fn(

@@ -49,13 +49,13 @@ class Critic(nn.Module):
     cnn_features: str = "32-32-32-32"
     cnn_strides: str = "2-1-1-1"
     cnn_padding: str = "VALID"
+    obs_type: str = "states"
 
     @staticmethod
     @nn.nowrap
     def get_default_config(updates=None):
         config = ConfigDict()
         config.arch = "256-256"
-        config.obs_type = "states"
         config.latent_dim = 50
 
         if updates is not None:
@@ -65,16 +65,16 @@ class Critic(nn.Module):
     def setup(self):
         self.config = self.get_default_config(self.config_updates)
 
-        if self.config.obs_type == "states":
-            self.encoder = Identity()
-            self.projection = Identity()
+        if self.obs_type == "states":
+            self.encoder = lambda x: x
+            self.projection = lambda x: x
         else:
             self.encoder = Encoder(
                 tuple(map(int, self.cnn_features.split("-"))),
                 tuple(map(int, self.cnn_strides.split("-"))),
                 self.cnn_padding,
             )
-            self.projection = Projection(self.config.latent_dim)
+            self.projection = nn.Sequential(nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh)
 
         self.fc = TwinMLP(arch=self.config.arch)
 
@@ -91,13 +91,13 @@ class Policy(nn.Module):
     cnn_features: str = "32-32-32-32"
     cnn_strides: str = "2-1-1-1"
     cnn_padding: str = "VALID"
+    obs_type: str = "states"
 
     @staticmethod
     @nn.nowrap
     def get_default_config(updates=None):
         config = ConfigDict()
         config.arch = "256-256"
-        config.obs_type = "states"
         config.latent_dim = 50
 
         config.expl_noise = 0.1
@@ -111,16 +111,16 @@ class Policy(nn.Module):
     def setup(self):
         self.config = self.get_default_config(self.config_updates)
 
-        if self.config.obs_type == "states":
-            self.encoder = Identity()
-            self.projection = Identity()
+        if self.obs_type == "states":
+            self.encoder = lambda x: x
+            self.projection = lambda x: x
         else:
             self.encoder = Encoder(
                 tuple(map(int, self.cnn_features.split("-"))),
                 tuple(map(int, self.cnn_strides.split("-"))),
                 self.cnn_padding,
             )
-            self.projection = Projection(self.config.latent_dim)
+            self.projection = nn.Sequential(nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh)
 
         self.fc = MLP(output_dim=self.action_dim, arch=self.config.arch)
 
@@ -157,13 +157,14 @@ class ICM(nn.Module):
     cnn_features: str = "32-32-32-32"
     cnn_strides: str = "2-1-1-1"
     cnn_padding: str = "VALID"
+    obs_type: str = "states"
 
     @staticmethod
     @nn.nowrap
     def get_default_config(updates=None):
         config = ConfigDict()
         config.arch = "256-256"
-        config.obs_type = "states"
+        config.latent_dim = 50
         config.icm_dim = 256
 
         if updates is not None:
@@ -173,51 +174,80 @@ class ICM(nn.Module):
     def setup(self):
         self.config = self.get_default_config(self.config_updates)
 
-        if self.config.obs_type == "states":
-            self.encoder = Identity()
-            self.projection = Identity()
+        if self.obs_type == "states":
+            self.encoder = lambda x: x
+            self.projection = lambda x: x
         else:
             self.encoder = Encoder(
                 tuple(map(int, self.cnn_features.split("-"))),
                 tuple(map(int, self.cnn_strides.split("-"))),
                 self.cnn_padding,
             )
-            self.projection = Projection(self.config.latent_dim)
+            self.projection = nn.Sequential(nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh)
 
-        self.trunk = [
+        self.trunk = nn.Sequential(
             nn.Dense(self.config.icm_dim),
-            nn.LayerNorm(self.config.icm_dim),
-        ]
+            nn.LayerNorm(self.config.icm_dim)
+        )
 
-        self.forward_net = [MLP(output_dim=self.config.icm_dim, arch=self.config.arch)]
+        self.forward_net = MLP(output_dim=self.config.icm_dim, arch=self.config.arch)
 
-        self.backward_net = [
-            MLP(output_dim=self.action_dim, arch=self.config.arch),
-            lambda x: nn.tanh(x),
-        ]
+        self.backward_net = nn.Sequential(MLP(output_dim=self.action_dim, arch=self.config.arch), nn.tanh)
 
     def __call__(self, obs, action, next_obs):
-        obs = self.encoder(obs)
-        next_obs = self.encoder(next_obs)
-        for layer in self.trunk:
-            obs = layer(obs)
-        for layer in self.trunk:
-            next_obs = layer(next_obs)
-        next_obs_hat = jnp.concatenate([obs, action], axis=-1)
-        for layer in self.forward_net:
-            next_obs_hat = layer(next_obs_hat)
-        action_hat = jnp.concatenate([obs, next_obs], axis=-1)
-        for layer in self.backward_net:
-            action_hat = layer(action_hat)
+        obs = self.trunk(self.encoder(obs))
+        next_obs = self.trunk(self.encoder(next_obs))
+        next_obs_hat = self.forward_net(jnp.concatenate([obs, action], axis=-1))
+        action_hat = self.backward_net(jnp.concatenate([obs, next_obs], axis=-1))
         forward_error = jnp.linalg.norm(
             next_obs - next_obs_hat, axis=-1, ord=2, keepdims=True
         )
         backward_error = jnp.linalg.norm(
             action - action_hat, axis=-1, ord=2, keepdims=True
         )
-        prediction_error = forward_error + backward_error
-        representation = jax.lax.stop_gradient(next_obs_hat)
-        return prediction_error, representation
+        error = forward_error + backward_error
+        embed = jax.lax.stop_gradient(next_obs_hat)
+        return error, embed
+
+
+class Reward(nn.Module):
+    config_updates: ... = None
+    cnn_features: str = "32-32-32-32"
+    cnn_strides: str = "2-1-1-1"
+    cnn_padding: str = "VALID"
+    obs_type: str = "states"
+
+    @staticmethod
+    @nn.nowrap
+    def get_default_config(updates=None):
+        config = ConfigDict()
+        config.arch = "256-256"
+        config.latent_dim = 50
+
+        if updates is not None:
+            config.update(ConfigDict(updates).copy_and_resolve_references())
+        return config
+
+    def setup(self):
+        self.config = self.get_default_config(self.config_updates)
+
+        if self.obs_type == "states":
+            self.encoder = lambda x: x
+            self.projection = lambda x: x
+        else:
+            self.encoder = Encoder(
+                tuple(map(int, self.cnn_features.split("-"))),
+                tuple(map(int, self.cnn_strides.split("-"))),
+                self.cnn_padding,
+            )
+            self.projection = nn.Sequential(nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh)
+
+        self.mlp = MLP(output_dim=1, arch=self.config.arch)
+
+    def __call__(self, obs, action):
+        obs = self.projection(self.encoder(obs))
+        reward = self.mlp(jnp.concatenate([obs, action], axis=-1))
+        return reward
 
 
 class SamplerPolicy(object):
@@ -272,39 +302,3 @@ class Encoder(nn.Module):
         else:
             x = x.reshape([-1])
         return x
-
-
-class Identity(nn.Module):
-    @nn.compact
-    def __call__(self, x):
-        return x
-
-
-class Projection(nn.Module):
-    latent_dim: int = 50
-
-    @nn.compact
-    def __call__(self, x):
-        x = nn.Dense(self.latent_dim)(x)
-        x = nn.LayerNorm()(x)
-        x = nn.tanh(x)
-        return x
-
-
-# def multiple_action_q_function(forward):
-#     # Forward the q function with multiple actions on each state, to be used as a decorator
-#     def wrapped(self, observations, actions, **kwargs):
-#         multiple_actions = False
-#         batch_size = observations.shape[0]
-#         if actions.ndim == 3 and observations.ndim == 2:
-#             multiple_actions = True
-#             observations = extend_and_repeat(observations, 1, actions.shape[1]).reshape(
-#                 -1, observations.shape[-1]
-#             )
-#             actions = actions.reshape(-1, actions.shape[-1])
-#         q_values = forward(self, observations, actions, **kwargs)
-#         if multiple_actions:
-#             q_values = q_values.reshape(batch_size, -1)
-#         return q_values
-
-#     return wrapped
