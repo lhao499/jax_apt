@@ -19,7 +19,7 @@ class UnlabelDataset(IterableDataset):
     def get_default_config(updates=None):
         config = ConfigDict()
         config.fetch_every = 1000
-        config.max_size = int(1e12)
+        config.max_size = int(1e42)
         config.discount = 0.99
         config.n_step = 3
 
@@ -172,7 +172,7 @@ class LearnLabelDataset(IterableDataset):
     def get_default_config(updates=None):
         config = ConfigDict()
         config.fetch_every = 1000
-        config.max_size = int(1e12)
+        config.max_size = int(1e42)
         config.discount = 0.99
         config.n_step = 3
 

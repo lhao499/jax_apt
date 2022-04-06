@@ -12,7 +12,7 @@ from .utils import extend_and_repeat
 
 class MLP(nn.Module):
     output_dim: int
-    arch: str = "256-256"
+    arch: str = "1024-1024"
 
     @nn.compact
     def __call__(self, input_tensor):
@@ -26,7 +26,7 @@ class MLP(nn.Module):
 
 
 class TwinMLP(nn.Module):
-    arch: str = "256-256"
+    arch: str = "1024-1024"
     num_qf: int = 2
 
     @nn.compact
@@ -55,7 +55,7 @@ class Critic(nn.Module):
     @nn.nowrap
     def get_default_config(updates=None):
         config = ConfigDict()
-        config.arch = "256-256"
+        config.arch = "1024-1024"
         config.latent_dim = 50
 
         if updates is not None:
@@ -74,7 +74,7 @@ class Critic(nn.Module):
                 tuple(map(int, self.cnn_strides.split("-"))),
                 self.cnn_padding,
             )
-            self.projection = nn.Sequential(nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh)
+            self.projection = nn.Sequential([nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh])
 
         self.fc = TwinMLP(arch=self.config.arch)
 
@@ -97,11 +97,11 @@ class Policy(nn.Module):
     @nn.nowrap
     def get_default_config(updates=None):
         config = ConfigDict()
-        config.arch = "256-256"
+        config.arch = "1024-1024"
         config.latent_dim = 50
 
-        config.expl_noise = 0.1
-        config.policy_noise = 0.2
+        config.expl_noise = 0.2
+        config.policy_noise = 0.3
         config.clip_noise = 0.5
 
         if updates is not None:
@@ -120,7 +120,7 @@ class Policy(nn.Module):
                 tuple(map(int, self.cnn_strides.split("-"))),
                 self.cnn_padding,
             )
-            self.projection = nn.Sequential(nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh)
+            self.projection = nn.Sequential([nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh])
 
         self.fc = MLP(output_dim=self.action_dim, arch=self.config.arch)
 
@@ -163,7 +163,7 @@ class ICM(nn.Module):
     @nn.nowrap
     def get_default_config(updates=None):
         config = ConfigDict()
-        config.arch = "256-256"
+        config.arch = "1024-1024"
         config.latent_dim = 50
         config.icm_dim = 256
 
@@ -183,16 +183,16 @@ class ICM(nn.Module):
                 tuple(map(int, self.cnn_strides.split("-"))),
                 self.cnn_padding,
             )
-            self.projection = nn.Sequential(nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh)
+            self.projection = nn.Sequential([nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh])
 
-        self.trunk = nn.Sequential(
+        self.trunk = nn.Sequential([
             nn.Dense(self.config.icm_dim),
             nn.LayerNorm(self.config.icm_dim)
-        )
+        ])
 
         self.forward_net = MLP(output_dim=self.config.icm_dim, arch=self.config.arch)
 
-        self.backward_net = nn.Sequential(MLP(output_dim=self.action_dim, arch=self.config.arch), nn.tanh)
+        self.backward_net = nn.Sequential([MLP(output_dim=self.action_dim, arch=self.config.arch), nn.tanh])
 
     def __call__(self, obs, action, next_obs):
         obs = self.trunk(self.encoder(obs))
@@ -206,7 +206,7 @@ class ICM(nn.Module):
             action - action_hat, axis=-1, ord=2, keepdims=True
         )
         error = forward_error + backward_error
-        embed = jax.lax.stop_gradient(next_obs_hat)
+        embed = jax.lax.stop_gradient(obs)
         return error, embed
 
 
@@ -221,7 +221,7 @@ class Reward(nn.Module):
     @nn.nowrap
     def get_default_config(updates=None):
         config = ConfigDict()
-        config.arch = "256-256"
+        config.arch = "1024-1024"
         config.latent_dim = 50
 
         if updates is not None:
@@ -240,7 +240,7 @@ class Reward(nn.Module):
                 tuple(map(int, self.cnn_strides.split("-"))),
                 self.cnn_padding,
             )
-            self.projection = nn.Sequential(nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh)
+            self.projection = nn.Sequential([nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh])
 
         self.mlp = MLP(output_dim=1, arch=self.config.arch)
 

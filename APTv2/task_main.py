@@ -43,7 +43,7 @@ if __name__ == "__main__":
         seed=42,
         n_total_iter=2000000,
         n_train_step_per_iter=1,
-        batch_size=256,
+        batch_size=1024,
         dataloader_n_workers=16,
         test_freq=1e5,
         log_freq=1e3,
@@ -61,10 +61,8 @@ if __name__ == "__main__":
         load_model_dir="",
         policy_lr=3e-4,
         critic_lr=3e-4,
-        soft_target_update_rate=5e-3,
-        nstep=3,
-        knn_k=3,
-        knn_avg=True,
+        soft_target_update_rate=1e-2,
+        nstep=1,
     )
 
 
@@ -335,6 +333,7 @@ def main(argv):
             )
 
             video_recoder.log_to_wandb()
+            log_metrics = {}
             log_metrics["average_return"] = metrics["r_traj"]
             log_metrics = prefix_metrics(log_metrics, "test")
             log_metrics["step"] = step
