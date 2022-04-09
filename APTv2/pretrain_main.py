@@ -246,27 +246,24 @@ def main(argv):
     FLAGS = absl.flags.FLAGS
     variant = get_user_flags(FLAGS, FLAGS_DEF)
 
-    train_env = Environment(FLAGS.env).environment
-    test_env = Environment(FLAGS.env).environment
-    action_dim = Environment(FLAGS.env).action_dim
-    observation_dim = Environment(FLAGS.env).observation_dim
+    train_env = Environment(FLAGS.env, FLAGS.max_traj_length)
+    test_env = Environment(FLAGS.env, FLAGS.max_traj_length)
+    action_dim = train_env.action_dim
+    observation_dim = train_env.observation_dim
     obs_type = FLAGS.env.obs_type
-    data_specs = (
-        train_env.observation_spec(),
-        train_env.action_spec(),
-        specs.Array((1,), np.float32, "reward"),
-        specs.Array((1,), np.float32, "discount"),
-    )
-    phys_specs = (
-        specs.Array((train_env._env.physics.state().shape[0],), np.float32, "physics"),
-    )
     data_dir = Path(FLAGS.logging.output_dir) / f"data_{str(uuid.uuid4().hex)}"
     data_dir.mkdir(parents=True, exist_ok=True)
     dataset = UnlabelDataset(
-        FLAGS.data, data_specs, phys_specs, data_dir, FLAGS.dataloader_n_workers
+        FLAGS.data, data_dir, FLAGS.dataloader_n_workers, FLAGS.max_traj_length,
     )
 
     def collect_random_data(dataset, env):
+        env = env.environment
+
+        keys = jax.random.split(jax.random.PRNGKey(42), 2)
+        step_fn = jax.jit(env.step)
+        reset_fn = jax.jit(jax.vmap(env.reset))
+
         data_storage = dataset._storage
         done = True
         for _ in trange(
@@ -275,14 +272,14 @@ def main(argv):
             desc="Collecting random data",
         ):
             if done:
-                time_step = env.reset()
-                data_storage.add(time_step, dict(physics=env._env.physics.state()))
-            a = np.random.uniform(size=(action_dim,), low=-1, high=1.0).astype(
+
+                obs = reset_fn(keys)
+            action = np.random.uniform(size=(FLAGS.batch_size, action_dim), low=-1, high=1.0).astype(
                 np.float32
             )
-            time_step = env.step(a)
-            done = time_step.last()
-            data_storage.add(time_step, dict(physics=env._env.physics.state()))
+            next_obs, reward, done, info = step_fn(action)
+            data_storage.add(obs, action, next_obs, reward, done, env._env._state.qp)
+            obs = next_obs
 
     collect_random_data(dataset, train_env)
 

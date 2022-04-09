@@ -13,6 +13,10 @@ from absl import logging
 from ml_collections import ConfigDict
 from torch.utils.data import IterableDataset
 
+"""
+Various datasets' implementations for Brax simulation
+"""
+
 
 class UnlabelDataset(IterableDataset):
     @staticmethod
@@ -21,15 +25,15 @@ class UnlabelDataset(IterableDataset):
         config.fetch_every = 1000
         config.max_size = int(1e42)
         config.discount = 0.99
-        config.n_step = 3
+        config.n_step = 1
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
         return config
 
-    def __init__(self, config, data_specs, phys_specs, data_dir, n_worker):
+    def __init__(self, config, data_dir, n_worker, episode_length):
         self.config = self.get_default_config(config)
-        storage = DataStorage(data_specs, phys_specs, data_dir)
+        storage = DataStorage(episode_length, data_dir)
         self._storage = storage
         self._episode_fns = []
         self._episodes = dict()
@@ -105,7 +109,7 @@ class RelabelDataset(IterableDataset):
         config = ConfigDict()
         config.max_size = int(1e10)
         config.discount = 0.99
-        config.n_step = 3
+        config.n_step = 1
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
@@ -174,15 +178,15 @@ class LearnLabelDataset(IterableDataset):
         config.fetch_every = 1000
         config.max_size = int(1e42)
         config.discount = 0.99
-        config.n_step = 3
+        config.n_step = 1
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
         return config
 
-    def __init__(self, config, data_specs, phys_specs, data_dir, n_worker, load_data_dir):
+    def __init__(self, config, data_dir, n_worker, load_data_dir, episode_length):
         self.config = self.get_default_config(config)
-        storage = DataStorage(data_specs, phys_specs, data_dir)
+        storage = DataStorage(episode_length, data_dir)
         self._storage = storage
         self._episode_fns = []
         self._episodes = dict()
@@ -271,25 +275,39 @@ class LearnLabelDataset(IterableDataset):
 
 
 def process_episode(episode, nstep=1, discounting=1):
-    # add +1 for the first dummy transition
-    idx = np.random.randint(0, episode_len(episode) - nstep + 1) + 1
-    obs = episode["observation"][idx - 1]
-    action = episode["action"][idx]
-    next_obs = episode["observation"][idx + nstep - 1]
-    reward = np.zeros_like(episode["reward"][idx])
-    discount = np.ones_like(episode["discount"][idx])
+    """
+    Selecting utility to choose observation at idx and next observation at idx + nstep along second dim of (n, l, d)
+    """
+    idx = np.random.randint(0, episode_len(episode))
+    '''TODO: How about sample batch of environment?'''
+    nth = np.random.randint(0, episode["observation"].shape[0])
+    obs = episode["observation"][nth, idx]
+    action = episode["action"][nth, idx]
+    next_obs = episode["next_observation"][nth, idx]
+    reward = np.zeros_like(episode["reward"][nth, idx])
+    discount = np.ones_like(episode["reward"][nth, idx])
     for i in range(nstep):
-        step_reward = episode["reward"][idx + i]
+        assert nstep == 1, NotImplementedError
+        '''NOTE: nstep must equal 1 since episode may not be complete'''
+        step_reward = episode["reward"][nth, idx + i]
         reward += discount * step_reward
-        discount *= episode["discount"][idx + i] * discounting
+        discount *= episode["discount"][nth, idx + i] * discounting
     return dict(
         obs=obs, action=action, reward=reward, discount=discount, next_obs=next_obs
     )
 
 
+# def flatten_batch_data(data):
+#     """Utility function to flatten batch episode (n, l, d)"""
+#     return data.reshape(-1, data.shape[-1])
+# obs, action, reward, discount, next_obs = map(flatten_batch_data, [obs, action, reward, discount, next_obs])
+
+
 def episode_len(episode):
-    # subtract -1 because the dummy first transition
-    return next(iter(episode.values())).shape[0] - 1
+    """
+    Return episode length l from (n, l, d) data
+    """
+    return next(iter(episode.values())).shape[1]
 
 
 def save_episode(episode, fn):
@@ -322,36 +340,44 @@ def relable_episode(env, episode):
 
 
 class DataStorage:
-    def __init__(self, data_specs, phys_specs, data_dir):
-        self._data_specs = data_specs
-        self._phys_specs = phys_specs
+    """
+    On disk data storage for Brax simulator
+    """
+    def __init__(self, episode_length, data_dir):
+        self._episode_length = episode_length
+        self._count_ep_len = 0
+        self._data_name = ["observation", "action", "next_observation", "reward", "done", "physics"]
         self._data_dir = data_dir
         data_dir.mkdir(exist_ok=True)
-        self._current_episode = defaultdict(list)
+        self._current_episode = {}
+        for name in self._data_name:
+            self._current_episode.update(dict(name=[]))
         self._episode_fns = []
         self._preload()
 
     def __len__(self):
         return self._num_transitions
 
-    def add(self, time_step, phys):
-        for key, value in phys.items():
-            self._current_episode[key].append(value)
-        for spec in self._data_specs:
-            value = time_step[spec.name]
-            if np.isscalar(value):
-                value = np.full(spec.shape, value, spec.dtype)
-            assert spec.shape == value.shape and spec.dtype == value.dtype
-            self._current_episode[spec.name].append(value)
-        if time_step.last():
+    @property
+    def _is_an_episode(self):
+        self._count_ep_len += 1
+        return self._count_ep_len % (self._episode_length - 1) == 0
+
+    def add(self, obs, action, next_obs, reward, done, physics):
+        self._current_episode["observation"].append(obs)
+        self._current_episode["action"].append(action)
+        self._current_episode["next_observation"].append(next_obs)
+        self._current_episode["reward"].append(reward)
+        self._current_episode["done"].append(done)
+        self._current_episode["physics"].append(physics)
+        if self._is_an_episode:
             episode = dict()
-            for spec in self._data_specs:
-                value = self._current_episode[spec.name]
-                episode[spec.name] = np.array(value, spec.dtype)
-            for spec in self._phys_specs:
-                value = self._current_episode[spec.name]
-                episode[spec.name] = np.array(value, spec.dtype)
-            self._current_episode = defaultdict(list)
+            for name in self._data_name:
+                value = self._current_episode[name]
+                '''batch of episodes (n, l, d)'''
+                episode[name] = np.array(value)
+            for name in self._data_name:
+                self._current_episode.update(dict(name=[]))
             eps_fn = self._store_episode(episode)
             self._episode_fns.append(eps_fn)
 
