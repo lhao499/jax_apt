@@ -74,7 +74,9 @@ class Critic(nn.Module):
                 tuple(map(int, self.cnn_strides.split("-"))),
                 self.cnn_padding,
             )
-            self.projection = nn.Sequential([nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh])
+            self.projection = nn.Sequential(
+                [nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh]
+            )
 
         self.fc = TwinMLP(arch=self.config.arch)
 
@@ -120,7 +122,9 @@ class Policy(nn.Module):
                 tuple(map(int, self.cnn_strides.split("-"))),
                 self.cnn_padding,
             )
-            self.projection = nn.Sequential([nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh])
+            self.projection = nn.Sequential(
+                [nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh]
+            )
 
         self.fc = MLP(output_dim=self.action_dim, arch=self.config.arch)
 
@@ -183,16 +187,19 @@ class ICM(nn.Module):
                 tuple(map(int, self.cnn_strides.split("-"))),
                 self.cnn_padding,
             )
-            self.projection = nn.Sequential([nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh])
+            self.projection = nn.Sequential(
+                [nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh]
+            )
 
-        self.trunk = nn.Sequential([
-            nn.Dense(self.config.icm_dim),
-            nn.LayerNorm(self.config.icm_dim)
-        ])
+        self.trunk = nn.Sequential(
+            [nn.Dense(self.config.icm_dim), nn.LayerNorm(self.config.icm_dim)]
+        )
 
         self.forward_net = MLP(output_dim=self.config.icm_dim, arch=self.config.arch)
 
-        self.backward_net = nn.Sequential([MLP(output_dim=self.action_dim, arch=self.config.arch), nn.tanh])
+        self.backward_net = nn.Sequential(
+            [MLP(output_dim=self.action_dim, arch=self.config.arch), nn.tanh]
+        )
 
     def __call__(self, obs, action, next_obs):
         obs = self.trunk(self.encoder(obs))
@@ -240,7 +247,9 @@ class Reward(nn.Module):
                 tuple(map(int, self.cnn_strides.split("-"))),
                 self.cnn_padding,
             )
-            self.projection = nn.Sequential([nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh])
+            self.projection = nn.Sequential(
+                [nn.Dense(self.config.latent_dim), nn.LayerNorm(), nn.tanh]
+            )
 
         self.mlp = MLP(output_dim=1, arch=self.config.arch)
 

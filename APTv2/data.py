@@ -152,8 +152,12 @@ class RelabelDataset(IterableDataset):
             self._size += episode_len(episode)
 
         returns = [np.sum(episode["reward"]) for episode in self._episodes.values()]
-        logging.info(f"max {max(returns):.5f}. min {min(returns):.5f}. mean {np.mean(returns):.5f} median {np.median(returns):.5f}")
-        logging.info(f"max size {self._max_size}. loaded size {self._size}. worker number {self._n_worker}. episode number {len(returns)}")
+        logging.info(
+            f"max {max(returns):.5f}. min {min(returns):.5f}. mean {np.mean(returns):.5f} median {np.median(returns):.5f}"
+        )
+        logging.info(
+            f"max size {self._max_size}. loaded size {self._size}. worker number {self._n_worker}. episode number {len(returns)}"
+        )
 
     def _sample_episode(self):
         eps_fn = random.choice(self._episode_fns)
@@ -217,7 +221,9 @@ class LearnLabelDataset(IterableDataset):
             if eps_idx % self._n_worker != worker_id:
                 continue
             self._store_episode(eps_fn)
-        logging.info(f"max size {self._max_size}. loaded size {self._size}. worker number {self._n_worker}. episode number {sum(1 for _ in self._episodes.values())}")
+        logging.info(
+            f"max size {self._max_size}. loaded size {self._size}. worker number {self._n_worker}. episode number {sum(1 for _ in self._episodes.values())}"
+        )
 
     def _sample_episode(self):
         eps_fn = random.choice(self._episode_fns)
@@ -279,7 +285,7 @@ def process_episode(episode, nstep=1, discounting=1):
     Selecting utility to choose observation at idx and next observation at idx + nstep along second dim of (n, l, d)
     """
     idx = np.random.randint(0, episode_len(episode))
-    '''TODO: How about sample batch of environment?'''
+    """TODO: How about sample batch of environment?"""
     nth = np.random.randint(0, episode["observation"].shape[0])
     obs = episode["observation"][nth, idx]
     action = episode["action"][nth, idx]
@@ -288,7 +294,7 @@ def process_episode(episode, nstep=1, discounting=1):
     discount = np.ones_like(episode["reward"][nth, idx])
     for i in range(nstep):
         assert nstep == 1, NotImplementedError
-        '''NOTE: nstep must equal 1 since episode may not be complete'''
+        """NOTE: nstep must equal 1 since episode may not be complete"""
         step_reward = episode["reward"][nth, idx + i]
         reward += discount * step_reward
         discount *= episode["discount"][nth, idx + i] * discounting
@@ -343,15 +349,14 @@ class DataStorage:
     """
     On disk data storage for Brax simulator
     """
+
     def __init__(self, episode_length, data_dir):
         self._episode_length = episode_length
         self._count_ep_len = 0
-        self._data_name = ["observation", "action", "next_observation", "reward", "done", "physics"]
         self._data_dir = data_dir
         data_dir.mkdir(exist_ok=True)
         self._current_episode = {}
-        for name in self._data_name:
-            self._current_episode.update(dict(name=[]))
+        self._current_episode = defaultdict(list)
         self._episode_fns = []
         self._preload()
 
@@ -372,12 +377,11 @@ class DataStorage:
         self._current_episode["physics"].append(physics)
         if self._is_an_episode:
             episode = dict()
-            for name in self._data_name:
+            for name in self._current_episode.keys():
                 value = self._current_episode[name]
-                '''batch of episodes (n, l, d)'''
+                """batch of episodes (n, l, d)"""
                 episode[name] = np.array(value)
-            for name in self._data_name:
-                self._current_episode.update(dict(name=[]))
+            self._current_episode = defaultdict(list)
             eps_fn = self._store_episode(episode)
             self._episode_fns.append(eps_fn)
 

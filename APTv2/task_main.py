@@ -32,8 +32,7 @@ if __name__ == "__main__":
     from .data import RelabelDataset
     from .environment import Environment
     from .model import Critic, Policy, SamplerPolicy
-    from .sampler import RolloutStorage
-    from .utils import (VideoRecorder, WandBLogger, batched_random_crop,
+    from .utils import (WandBLogger, batched_random_crop,
                         define_flags_with_default, get_metrics, get_user_flags,
                         load_checkpoint, load_pickle, mse_loss, next_rng,
                         prefix_metrics, set_random_seed, update_target_network,
@@ -99,13 +98,17 @@ def create_train_step(
 
             policy_params = flax.core.unfreeze(policy_params)
             for key in policy_params:
-                assert key in checkpoint_state["policy"].params.keys(), f"pretrained model miss key={key}"
+                assert (
+                    key in checkpoint_state["policy"].params.keys()
+                ), f"pretrained model miss key={key}"
                 policy_params[key] = checkpoint_state["policy"].params[key]
             policy_params = flax.core.freeze(policy_params)
 
             qf_params = flax.core.unfreeze(qf_params)
             for key in qf_params:
-                assert key in checkpoint_state["qf"].params.keys(), f"pretrained model miss key={key}"
+                assert (
+                    key in checkpoint_state["qf"].params.keys()
+                ), f"pretrained model miss key={key}"
                 qf_params[key] = checkpoint_state["qf"].params[key]
             qf_params = flax.core.freeze(qf_params)
 

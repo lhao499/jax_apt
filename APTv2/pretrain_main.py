@@ -15,7 +15,6 @@ if __name__ == "__main__":
 
     import absl.app
     import absl.flags
-    from absl import logging
     import flax
     import jax
     import jax.numpy as jnp
@@ -23,6 +22,7 @@ if __name__ == "__main__":
     import optax
     import torch
     import wandb
+    from absl import logging
     from dm_env import specs
     from flax import jax_utils
     from flax.training.train_state import TrainState
@@ -33,8 +33,7 @@ if __name__ == "__main__":
     from .data import UnlabelDataset
     from .environment import Environment
     from .model import ICM, Critic, Policy, SamplerPolicy
-    from .sampler import RolloutStorage
-    from .utils import (VideoRecorder, WandBLogger, batched_random_crop,
+    from .utils import (WandBLogger, batched_random_crop,
                         define_flags_with_default, get_metrics, get_user_flags,
                         mse_loss, next_rng, prefix_metrics, set_random_seed,
                         update_target_network, value_and_multi_grad)
@@ -242,61 +241,71 @@ def create_train_step(
     return create_state, wrapped
 
 
+def create_sample_step(env, data_storage=None):
+    reset_fn = jax.jit(jax.vmap(env.reset))
+    keys = jax.random.split(jax.random.PRNGKey(42), jax.local_device_count())
+    step_fn = jax.jit(env.step)
+
+    def sample_fn(sample_state, sampler_policy, rng, step, deterministic=False, random=False):
+
+        @partial(jax.pmap, axis_name="pmap")
+        def wrapped(sample_state, rng):
+
+            def sample_step(carry):
+                state, new_rng = carry
+                new_rng, split_rng = jax.random.split(new_rng)
+                action = sampler_policy(
+                    split_rng, state.obs, deterministic=deterministic, random=random
+                )
+                next_state = step_fn(state, action)
+                if data_storage is not None:
+                    # data_storage.add(
+                    #     state.obs,
+                    #     action,
+                    #     next_state.obs,
+                    #     next_state.reward,
+                    #     next_state.done,
+                    #     next_state.qp,
+                    # )
+                    data_storage.add(
+                        np.array(state.obs),
+                        np.array(action),
+                        np.array(next_state.obs),
+                        np.array(next_state.reward),
+                        np.array(next_state.done),
+                        np.array(next_state.qp),
+                    )
+                return next_state, new_rng
+
+            (sample_state, rng), _ = jax.lax.scan(
+                lambda carry, _: (sample_step(carry), ()), ((sample_state, rng)), (), length=step
+            )
+
+            return sample_state, rng
+
+        rng = jax.device_put_sharded(next_rng(jax.local_device_count()), jax.local_devices())
+        return wrapped(sample_state, rng)
+
+    return reset_fn(keys), sample_fn
+
+
 def main(argv):
     FLAGS = absl.flags.FLAGS
     variant = get_user_flags(FLAGS, FLAGS_DEF)
 
-    train_env = Environment(FLAGS.env, FLAGS.max_traj_length)
-    test_env = Environment(FLAGS.env, FLAGS.max_traj_length)
-    action_dim = train_env.action_dim
-    observation_dim = train_env.observation_dim
+    train_env, observation_dim, action_dim = Environment(
+        FLAGS.env, FLAGS.max_traj_length
+    ).setup()
+    test_env, *_ = Environment(FLAGS.env, FLAGS.max_traj_length).setup()
     obs_type = FLAGS.env.obs_type
     data_dir = Path(FLAGS.logging.output_dir) / f"data_{str(uuid.uuid4().hex)}"
     data_dir.mkdir(parents=True, exist_ok=True)
     dataset = UnlabelDataset(
-        FLAGS.data, data_dir, FLAGS.dataloader_n_workers, FLAGS.max_traj_length,
+        FLAGS.data,
+        data_dir,
+        FLAGS.dataloader_n_workers,
+        FLAGS.max_traj_length,
     )
-
-    def collect_random_data(dataset, env):
-        env = env.environment
-
-        keys = jax.random.split(jax.random.PRNGKey(42), 2)
-        step_fn = jax.jit(env.step)
-        reset_fn = jax.jit(jax.vmap(env.reset))
-
-        data_storage = dataset._storage
-        done = True
-        for _ in trange(
-            FLAGS.dataloader_n_workers * int(1e3),
-            ncols=0,
-            desc="Collecting random data",
-        ):
-            if done:
-
-                obs = reset_fn(keys)
-            action = np.random.uniform(size=(FLAGS.batch_size, action_dim), low=-1, high=1.0).astype(
-                np.float32
-            )
-            next_obs, reward, done, info = step_fn(action)
-            data_storage.add(obs, action, next_obs, reward, done, env._env._state.qp)
-            obs = next_obs
-
-    collect_random_data(dataset, train_env)
-
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=FLAGS.batch_size,
-        num_workers=FLAGS.dataloader_n_workers,
-        prefetch_factor=2,
-        persistent_workers=True,
-        drop_last=True,
-    )
-
-    for _ in zip(
-        trange(10, ncols=0, desc="Warming up dataloader"),
-        data_loader,
-    ):
-        pass
 
     jax_devices = jax.local_devices()
     n_devices = len(jax_devices)
@@ -314,10 +323,36 @@ def main(argv):
     logger.log(prefix_metrics(variant, "variant"))
     set_random_seed(FLAGS.seed * (jax_process_index + 1))
 
-    video_recoder = VideoRecorder(root_dir=logger.output_dir / "video")
+    train_sample_state, train_sample_fn = create_sample_step(
+        train_env, dataset._storage
+    )
+    test_sample_state, test_sample_fn = create_sample_step(train_env, None)
+    warmup_sample_state, warmup_sample_fn = create_sample_step(
+        train_env, dataset._storage
+    )
+    warmup_sample_fn(
+        warmup_sample_state,
+        lambda *args, **kwargs: jax.random.uniform(
+            next_rng(), (FLAGS.env.n_env, action_dim), minval=-1.0, maxval=1.0
+        ),
+        next_rng(),
+        int(1e4),
+    )
 
-    train_sampler = RolloutStorage(train_env, FLAGS.max_traj_length, None)
-    test_sampler = RolloutStorage(test_env, FLAGS.max_traj_length, video_recoder)
+    data_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=FLAGS.batch_size,
+        num_workers=FLAGS.dataloader_n_workers,
+        prefetch_factor=2,
+        persistent_workers=True,
+        drop_last=True,
+    )
+
+    for _ in zip(
+        trange(10, ncols=0, desc="Warming up dataloader"),
+        data_loader,
+    ):
+        pass
 
     policy = Policy(FLAGS.policy, action_dim)
     critic = Critic(FLAGS.critic)
@@ -338,12 +373,11 @@ def main(argv):
     state, target_qf_params = create_state(policy, critic, icm)
     sampler_policy = SamplerPolicy(policy, {"params": state["policy"].params})
 
-    train_sampler.sample_traj(
-        next_rng(),
+    train_sample_state = train_sample_fn(
+        train_sample_state,
         sampler_policy.update_params({"params": state["policy"].params}),
-        max(FLAGS.dataloader_n_workers, 10),
-        deterministic=False,
-        data_storage=dataset._storage,
+        next_rng(),
+        max(FLAGS.dataloader_n_workers, 10) * int(1e3),
         random=True,
     )
 
@@ -383,14 +417,11 @@ def main(argv):
                 batch, state, sharded_rng, target_qf_params
             )
 
-        train_sampler.sample_step(
+        train_sample_state = train_sample_fn(
+            train_sample_state,
+            sampler_policy.update_params({"params": state["policy"].params}),
             jax_utils.unreplicate(sharded_rng),
-            sampler_policy.update_params(
-                {"params": jax_utils.unreplicate(state)["policy"].params}
-            ),
             FLAGS.n_sample_step_per_iter,
-            deterministic=False,
-            data_storage=dataset._storage,
         )
 
         if step % FLAGS.log_freq == 0:
@@ -401,18 +432,18 @@ def main(argv):
             tqdm.write("\n" + pprint.pformat(log_metrics) + "\n")
 
         if step % FLAGS.test_freq == 0:
-            metrics, _ = test_sampler.sample_traj(
+            test_sample_state = test_sample_fn(
+                test_sample_state,
+                sampler_policy.update_params({"params": state["policy"].params}),
                 jax_utils.unreplicate(sharded_rng),
-                sampler_policy.update_params(
-                    {"params": jax_utils.unreplicate(state)["policy"].params}
-                ),
-                FLAGS.n_test_traj,
+                FLAGS.n_test_traj * FLAGS.max_traj_length,
                 deterministic=True,
             )
 
-            video_recoder.log_to_wandb()
             log_metrics = {}
-            log_metrics["average_return"] = metrics["r_traj"]
+            test_metrics = test_sample_state.info["eval_metrics"]
+            test_metrics.completed_episodes.block_until_ready()
+            log_metrics.update(test_metrics)
             log_metrics["env_steps"] = len(dataset._storage)
             log_metrics = prefix_metrics(log_metrics, "test")
             log_metrics["step"] = step

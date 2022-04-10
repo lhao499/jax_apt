@@ -15,7 +15,6 @@ if __name__ == "__main__":
 
     import absl.app
     import absl.flags
-    from absl import logging
     import flax
     import jax
     import jax.numpy as jnp
@@ -23,6 +22,7 @@ if __name__ == "__main__":
     import optax
     import torch
     import wandb
+    from absl import logging
     from dm_env import specs
     from flax import jax_utils
     from flax.training.train_state import TrainState
@@ -32,9 +32,8 @@ if __name__ == "__main__":
 
     from .data import LearnLabelDataset
     from .environment import Environment
-    from .model import Critic, Policy, SamplerPolicy, Reward
-    from .sampler import RolloutStorage
-    from .utils import (VideoRecorder, WandBLogger, batched_random_crop,
+    from .model import Critic, Policy, Reward, SamplerPolicy
+    from .utils import (WandBLogger, batched_random_crop,
                         define_flags_with_default, get_metrics, get_user_flags,
                         load_checkpoint, load_pickle, mse_loss, next_rng,
                         prefix_metrics, set_random_seed, update_target_network,
@@ -105,13 +104,17 @@ def create_train_step(
 
             policy_params = flax.core.unfreeze(policy_params)
             for key in policy_params:
-                assert key in checkpoint_state["policy"].params.keys(), f"pretrained model miss key={key}"
+                assert (
+                    key in checkpoint_state["policy"].params.keys()
+                ), f"pretrained model miss key={key}"
                 policy_params[key] = checkpoint_state["policy"].params[key]
             policy_params = flax.core.freeze(policy_params)
 
             qf_params = flax.core.unfreeze(qf_params)
             for key in qf_params:
-                assert key in checkpoint_state["qf"].params.keys(), f"pretrained model miss key={key}"
+                assert (
+                    key in checkpoint_state["qf"].params.keys()
+                ), f"pretrained model miss key={key}"
                 qf_params[key] = checkpoint_state["qf"].params[key]
             qf_params = flax.core.freeze(qf_params)
 
@@ -267,7 +270,12 @@ def main(argv):
     data_dir = Path(FLAGS.logging.output_dir) / f"data_{str(uuid.uuid4().hex)}"
     data_dir.mkdir(parents=True, exist_ok=True)
     dataset = LearnLabelDataset(
-        FLAGS.data, data_specs, phys_specs, data_dir, FLAGS.dataloader_n_workers, FLAGS.load_data_dir
+        FLAGS.data,
+        data_specs,
+        phys_specs,
+        data_dir,
+        FLAGS.dataloader_n_workers,
+        FLAGS.load_data_dir,
     )
 
     data_loader = torch.utils.data.DataLoader(
