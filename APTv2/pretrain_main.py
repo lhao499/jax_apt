@@ -246,11 +246,11 @@ def create_sample_step(env, data_storage=None):
     keys = jax.random.split(jax.random.PRNGKey(42), jax.local_device_count())
     step_fn = jax.jit(env.step)
 
-    def sample_fn(sample_state, sampler_policy, rng, step, deterministic=False, random=False):
-
+    def sample_fn(
+        sample_state, sampler_policy, rng, step, deterministic=False, random=False
+    ):
         @partial(jax.pmap, axis_name="pmap")
         def wrapped(sample_state, rng):
-
             def sample_step(carry):
                 state, new_rng = carry
                 new_rng, split_rng = jax.random.split(new_rng)
@@ -278,12 +278,17 @@ def create_sample_step(env, data_storage=None):
                 return next_state, new_rng
 
             (sample_state, rng), _ = jax.lax.scan(
-                lambda carry, _: (sample_step(carry), ()), ((sample_state, rng)), (), length=step
+                lambda carry, _: (sample_step(carry), ()),
+                ((sample_state, rng)),
+                (),
+                length=step,
             )
 
             return sample_state, rng
 
-        rng = jax.device_put_sharded(next_rng(jax.local_device_count()), jax.local_devices())
+        rng = jax.device_put_sharded(
+            next_rng(jax.local_device_count()), jax.local_devices()
+        )
         return wrapped(sample_state, rng)
 
     return reset_fn(keys), sample_fn
