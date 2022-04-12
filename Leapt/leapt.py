@@ -13,6 +13,7 @@ from brax.io import model
 from brax.training import distribution, networks, normalization, pmap
 from brax.training.types import Params, PRNGKey
 from flax import linen
+from functools import partial
 
 Metrics = Mapping[str, jnp.ndarray]
 
@@ -120,6 +121,8 @@ def train_leapt(
     grad_updates_per_step: float = 1,
     progress_fn: Optional[Callable[[int, Dict[str, Any]], None]] = None,
     checkpoint_dir: Optional[str] = None,
+    knn_k: int = 64,
+    knn_avg: bool = True,
 ):
     """SAC training."""
     assert min_replay_size % num_envs == 0
@@ -150,6 +153,7 @@ def train_leapt(
     key = jax.random.PRNGKey(seed)
     global_key, local_key = jax.random.split(key)
     del key
+    key_models = jax.random.split(global_key)
     local_key = jax.random.fold_in(local_key, process_id)
     local_key, key_env, key_eval = jax.random.split(local_key, 3)
 
@@ -311,6 +315,25 @@ def train_leapt(
     actor_grad = jax.jit(jax.value_and_grad(actor_loss))
 
     @jax.jit
+    def APTEnt(data):
+
+        def dist_fn(x, y, ord):
+            return jnp.sum(jnp.linalg.norm(x - y, ord))
+
+        def distance_fn(a, b):
+            return jax.vmap(jax.vmap(partial(dist_fn, ord=2), (None, 0)), (0, None))(a, b)
+
+        k = min(knn_k, data.shape[0])
+        neg_distance = -distance_fn(data, data)
+        neg_distance, _ = jax.lax.top_k(neg_distance, k)
+        distance = -neg_distance
+        if knn_avg:
+            entropy = distance.reshape((data.shape[0], k)).mean(axis=1)  # (b, k) -> (b,)
+        else:
+            entropy = jax.lax.sort(distance, dimension=-1)[:, -1].reshape(-1,) # (b,)
+        return entropy
+
+    @jax.jit
     def update_step(
         state: TrainingState,
         transitions: jnp.ndarray,
@@ -327,6 +350,9 @@ def train_leapt(
             d_t=transitions[:, -2],
             truncation_t=transitions[:, -1],
         )
+
+        new_rewards = APTEnt(normalized_transitions.o_t)
+        normalized_transitions = normalized_transitions.replace(r_t=new_rewards)
 
         (key, key_alpha, key_critic, key_actor) = jax.random.split(state.key, 4)
 
@@ -489,9 +515,6 @@ def train_leapt(
         )
 
         training_state, transitions = sample_data(training_state, replay_buffer)
-        import ipdb
-
-        ipdb.set_trace()
         training_state, metrics = jax.lax.scan(
             update_step, training_state, transitions, length=num_updates
         )

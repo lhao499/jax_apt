@@ -150,6 +150,7 @@ def train_sac(
     key = jax.random.PRNGKey(seed)
     global_key, local_key = jax.random.split(key)
     del key
+    key_models = jax.random.split(global_key)
     local_key = jax.random.fold_in(local_key, process_id)
     local_key, key_env, key_eval = jax.random.split(local_key, 3)
 
