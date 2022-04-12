@@ -29,15 +29,6 @@ class Transition:
     truncation_t: jnp.ndarray
 
 
-# The rewarder allows to change the reward of before the learner trains.
-RewarderState = Any
-RewarderInit = Callable[[int, PRNGKey], RewarderState]
-ComputeReward = Callable[
-    [RewarderState, Transition, PRNGKey], Tuple[RewarderState, jnp.ndarray, Metrics]
-]
-Rewarder = Tuple[RewarderInit, ComputeReward]
-
-
 @flax.struct.dataclass
 class ReplayBuffer:
     """Contains data related to a replay buffer."""
@@ -61,8 +52,6 @@ class TrainingState:
     alpha_optimizer_state: optax.OptState
     alpha_params: Params
     normalizer_params: Params
-    # The is passed to the rewarder to update the reward.
-    rewarder_state: Any
 
 
 def make_sac_networks(
@@ -130,9 +119,6 @@ def train_sac(
     max_replay_size: int = 1048576,
     grad_updates_per_step: float = 1,
     progress_fn: Optional[Callable[[int, Dict[str, Any]], None]] = None,
-    # The rewarder is an init function and a compute_reward function.
-    # It is used to change the reward before the learner trains on it.
-    make_rewarder: Optional[Callable[[], Rewarder]] = None,
     checkpoint_dir: Optional[str] = None,
 ):
     """SAC training."""
@@ -165,7 +151,6 @@ def train_sac(
     global_key, local_key = jax.random.split(key)
     del key
     local_key = jax.random.fold_in(local_key, process_id)
-    key_models, key_rewarder = jax.random.split(global_key, 2)
     local_key, key_env, key_eval = jax.random.split(local_key, 3)
 
     core_env = environment_fn(
@@ -226,14 +211,6 @@ def train_sac(
     ) = normalization.create_observation_normalizer(
         obs_size, normalize_observations, pmap_to_devices=local_devices_to_use
     )
-
-    if make_rewarder is not None:
-        init, compute_reward = make_rewarder()
-        rewarder_state = init(obs_size, key_rewarder)
-        rewarder_state = pmap.bcast_local_devices(rewarder_state, local_devices_to_use)
-    else:
-        rewarder_state = None
-        compute_reward = None
 
     key_debug = jax.random.PRNGKey(seed + 666)
 
@@ -351,20 +328,7 @@ def train_sac(
             truncation_t=transitions[:, -1],
         )
 
-        (key, key_alpha, key_critic, key_actor, key_rewarder) = jax.random.split(
-            state.key, 5
-        )
-
-        if compute_reward is not None:
-            new_rewarder_state, rewards, rewarder_metrics = compute_reward(
-                state.rewarder_state, normalized_transitions, key_rewarder
-            )
-            # Assertion prevents building errors.
-            assert hasattr(normalized_transitions, "replace")
-            normalized_transitions = normalized_transitions.replace(r_t=rewards)
-        else:
-            new_rewarder_state = state.rewarder_state
-            rewarder_metrics = {}
+        (key, key_alpha, key_critic, key_actor) = jax.random.split(state.key, 4)
 
         alpha_loss, alpha_grads = alpha_grad(
             state.alpha_params, state.policy_params, normalized_transitions, key_alpha
@@ -410,7 +374,6 @@ def train_sac(
             "actor_loss": actor_loss,
             "alpha_loss": alpha_loss,
             "alpha": jnp.exp(alpha_params),
-            **rewarder_metrics,
         }
 
         new_state = TrainingState(
@@ -424,7 +387,6 @@ def train_sac(
             alpha_optimizer_state=alpha_optimizer_state,
             alpha_params=alpha_params,
             normalizer_params=state.normalizer_params,
-            rewarder_state=new_rewarder_state,
         )
         return new_state, metrics
 
@@ -561,7 +523,6 @@ def train_sac(
         alpha_optimizer_state=alpha_optimizer_state,
         alpha_params=log_alpha,
         normalizer_params=normalizer_params,
-        rewarder_state=rewarder_state,
     )
 
     training_walltime = 0

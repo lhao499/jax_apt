@@ -241,6 +241,7 @@ def flatten_config_dict(config, prefix=None):
 def prefix_metrics(metrics, prefix):
     return {"{}/{}".format(prefix, key): value for key, value in metrics.items()}
 
+
 class WandBLogger(object):
     @staticmethod
     def get_default_config(updates=None):

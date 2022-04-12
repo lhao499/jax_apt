@@ -6,13 +6,14 @@ from absl import app, flags
 from brax import envs
 from brax.io import html, metrics, model
 
-from .sac import train_sac
 from .leapt import train_leapt
-from .utils import WandBLogger, define_flags_with_default, get_user_flags, prefix_metrics
+from .sac import train_sac
+from .utils import (WandBLogger, define_flags_with_default, get_user_flags,
+                    prefix_metrics)
 
 FLAGS_DEF = define_flags_with_default(
-    learner='sac',
-    env='ant',
+    learner="sac",
+    env="ant",
     total_env_steps=50000000,
     eval_frequency=10,
     seed=0,
@@ -87,7 +88,7 @@ def main(unused_argv):
                 episode_length=FLAGS.episode_length,
                 progress_fn=writer.write_scalars,
             )
-        if FLAGS.learner == 'leapt':
+        if FLAGS.learner == "leapt":
             inference_fn, params, _ = train_leapt(
                 environment_fn=env_fn,
                 logger=logger,
@@ -105,7 +106,7 @@ def main(unused_argv):
                 reward_scaling=FLAGS.reward_scaling,
                 grad_updates_per_step=FLAGS.grad_updates_per_step,
                 episode_length=FLAGS.episode_length,
-                progress_fn=writer.write_scalars
+                progress_fn=writer.write_scalars,
             )
 
     # Save to flax serialized checkpoint.
