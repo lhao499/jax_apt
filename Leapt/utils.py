@@ -241,14 +241,15 @@ def flatten_config_dict(config, prefix=None):
 def prefix_metrics(metrics, prefix):
     return {"{}/{}".format(prefix, key): value for key, value in metrics.items()}
 
+
 class WandBLogger(object):
     @staticmethod
     def get_default_config(updates=None):
         config = ConfigDict()
         config.online = False
-        config.prefix = "APTv2"
-        config.project = "aptv2"
-        config.output_dir = "/tmp/aptv2"
+        config.prefix = "LeAPT"
+        config.project = "leapt"
+        config.output_dir = "/tmp/leapt"
         config.gcs_output_dir = ""
         config.random_delay = 0.0
         config.experiment_id = config_dict.placeholder(str)

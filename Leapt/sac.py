@@ -113,6 +113,7 @@ def make_sac_networks(
 def train_sac(
     environment_fn: Callable[..., envs.Env],
     num_timesteps,
+    logger,
     episode_length: int,
     action_repeat: int = 1,
     num_envs: int = 1,
@@ -123,7 +124,6 @@ def train_sac(
     batch_size: int = 256,
     log_frequency: int = 10000,
     normalize_observations: bool = False,
-    max_devices_per_host: Optional[int] = None,
     reward_scaling: float = 1.0,
     tau: float = 0.005,
     min_replay_size: int = 8192,
@@ -144,8 +144,6 @@ def train_sac(
     process_id = jax.process_index()
     local_device_count = jax.local_device_count()
     local_devices_to_use = local_device_count
-    if max_devices_per_host:
-        local_devices_to_use = min(local_devices_to_use, max_devices_per_host)
     logging.info(
         "Device count: %d, process count: %d (id %d), local device count: %d, "
         "devices to be used count: %d",
@@ -621,6 +619,7 @@ def train_sac(
                 ),
             )
             logging.info(metrics)
+            logger.log(metrics)
             if progress_fn:
                 progress_fn(current_step, metrics)
 
