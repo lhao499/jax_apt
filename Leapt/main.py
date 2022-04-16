@@ -10,6 +10,13 @@ from .leapt import train_leapt
 from .sac import train_sac
 from .utils import (WandBLogger, define_flags_with_default, get_user_flags,
                     prefix_metrics)
+from .data import Dataset, EmptyDataset, LoadDataset
+from pathlib import Path
+from flax import jax_utils
+import jax.numpy as jnp
+import numpy as np
+import logging
+
 
 FLAGS_DEF = define_flags_with_default(
     learner="sac",
@@ -36,7 +43,17 @@ FLAGS_DEF = define_flags_with_default(
     max_replay_size=1048576,
     grad_updates_per_step=1.0,
     logging=WandBLogger.get_default_config(),
+    dataset=Dataset.get_default_config(),
     log_all_worker=False,
+    knn_avg=True,
+    knn_k=64,
+    use_apt_to_play=False,
+    save_every_play=False,
+    save_last_play=False,
+    load_data_dir="",
+    use_reward_to_adapt=False,
+    sample_chuck_size=0,
+    adapt_updates_per_step=256,
 )
 
 
@@ -45,20 +62,70 @@ def main(unused_argv):
     FLAGS = flags.FLAGS
     variant = get_user_flags(FLAGS, FLAGS_DEF)
 
-    env_fn = envs.create_fn(FLAGS.env)
-
     jax_devices = jax.local_devices()
     n_devices = len(jax_devices)
     assert FLAGS.batch_size % n_devices == 0
 
     variant["jax_process_index"] = jax.process_index()
     variant["jax_process_count"] = jax.process_count()
+    if FLAGS.load_data_dir == "":
+        data_dir = Path(f"/tmp/{uuid.uuid4().hex}")
+    else:
+        data_dir = Path(FLAGS.load_data_dir)
+    variant["data_dir"] = str(data_dir)
+    logging.info(f"data dir is {str(data_dir)}")
     logger = WandBLogger(
         config=FLAGS.logging,
         variant=variant,
         enable=FLAGS.log_all_worker or (jax.process_index() == 0),
     )
     logger.log(prefix_metrics(variant, "variant"))
+
+    if FLAGS.learner == "leapt":
+        num_updates = int(FLAGS.num_envs * FLAGS.grad_updates_per_step)
+        num_sample_total = num_updates * FLAGS.batch_size
+        data_n_worker = FLAGS.dataset.n_worker
+        if FLAGS.sample_chuck_size == 0:
+            sample_chuck_size = FLAGS.num_envs
+        else:
+            sample_chuck_size = FLAGS.sample_chuck_size
+        data_batch_size = int(num_sample_total / sample_chuck_size)
+
+        if FLAGS.use_reward_to_adapt:
+            dataset = LoadDataset(FLAGS.dataset, data_dir, sample_chuck_size)
+        elif FLAGS.use_apt_to_play:
+            dataset = EmptyDataset(FLAGS.dataset, data_dir, sample_chuck_size)
+
+        data_loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=data_batch_size,
+            num_workers=data_n_worker,
+            prefetch_factor=2,
+            persistent_workers=True,
+            drop_last=True,
+        )
+
+        data_storage = dataset._storage
+
+        def generate_batch(it):
+            def prepare_data(xs):
+                def _prepare(x):
+                    return x.reshape((jax.local_device_count(), num_updates, FLAGS.batch_size,  x.shape[-1]))
+
+                return jax.tree_map(_prepare, xs)
+
+            while True:
+                for batch in it:
+                    batch = np.asarray(batch)
+                    yield prepare_data(batch)
+
+        data_iter = iter(jax_utils.prefetch_to_device(generate_batch(data_loader), 2))
+    else:
+        data_storage = None
+        data_iter = None
+        data_n_worker = 1
+
+    env_fn = envs.create_fn(FLAGS.env)
 
     with metrics.Writer(FLAGS.logdir) as writer:
         writer.write_hparams(
@@ -107,6 +174,17 @@ def main(unused_argv):
                 grad_updates_per_step=FLAGS.grad_updates_per_step,
                 episode_length=FLAGS.episode_length,
                 progress_fn=writer.write_scalars,
+                knn_avg=FLAGS.knn_avg,
+                knn_k=FLAGS.knn_k,
+                use_apt_to_play=FLAGS.use_apt_to_play,
+                use_reward_to_adapt=FLAGS.use_reward_to_adapt,
+                adapt_updates_per_step=FLAGS.adapt_updates_per_step,
+                save_every_play=FLAGS.save_every_play,
+                save_last_play=FLAGS.save_last_play,
+                data_storage=data_storage,
+                data_iter=data_iter,
+                data_n_worker=data_n_worker,
+                data_dir=data_dir,
             )
 
     # Save to flax serialized checkpoint.
@@ -137,4 +215,6 @@ def main(unused_argv):
 
 
 if __name__ == "__main__":
+    import torch
+    torch.multiprocessing.set_start_method("spawn")
     app.run(main)

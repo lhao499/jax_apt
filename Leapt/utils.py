@@ -268,8 +268,8 @@ class WandBLogger(object):
             self.config.experiment_id = uuid.uuid4().hex
 
         if self.config.prefix != "":
-            self.config.project = "{}--{}".format(
-                self.config.prefix, self.config.project
+            self.config.experiment_id = "{}--{}".format(
+                self.config.prefix, self.config.experiment_id
             )
 
         if self.enable:

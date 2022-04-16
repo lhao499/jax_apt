@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 import flax
 import jax
 import jax.numpy as jnp
-import numpy as onp
+import numpy as np
 import optax
 from absl import logging
 from brax import envs
@@ -564,7 +564,7 @@ def train_sac(
                 ),
                 **dict(
                     {
-                        f"training/{name}": onp.mean(value)
+                        f"training/{name}": np.mean(value)
                         for name, value in training_metrics.items()
                     }
                 ),
@@ -579,6 +579,7 @@ def train_sac(
                         "training/grad_updates": training_state.steps[0],
                     }
                 ),
+                **dict({"training/current_step": current_step}),
             )
             logging.info(metrics)
             logger.log(metrics)
