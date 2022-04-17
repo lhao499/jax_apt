@@ -796,8 +796,8 @@ def train_leapt(
                 if save_every_play:
                     data_storage.add(replay_buffer_data)
                 storing_walltime += time.time() - store_t
-            print(f'init storing walltime: {storing_walltime}')
             print(f'init sampling walltime: {sampling_walltime}')
+            print(f'init storing walltime: {storing_walltime}')
 
             training_walltime += time.time() - t
 

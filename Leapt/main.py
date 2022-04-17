@@ -1,60 +1,59 @@
-import os
-import uuid
+if __name__ == "__main__":
+    import os
+    import uuid
 
-import jax
-from absl import app, flags
-from brax import envs
-from brax.io import html, metrics, model
+    import jax
+    from absl import app, flags
+    from brax import envs
+    from brax.io import html, metrics, model
 
-from .leapt import train_leapt
-from .sac import train_sac
-from .utils import (WandBLogger, define_flags_with_default, get_user_flags,
-                    prefix_metrics)
-from .data import Dataset, EmptyDataset, LoadDataset
-from pathlib import Path
-from flax import jax_utils
-import jax.numpy as jnp
-import numpy as np
-import logging
+    from .leapt import train_leapt
+    from .sac import train_sac
+    from .utils import WandBLogger, define_flags_with_default, get_user_flags, prefix_metrics
+    from .data import Dataset, EmptyDataset, LoadDataset
+    from pathlib import Path
+    from flax import jax_utils
+    import numpy as np
+    import logging
 
 
-FLAGS_DEF = define_flags_with_default(
-    learner="sac",
-    env="ant",
-    total_env_steps=50000000,
-    eval_frequency=10,
-    seed=0,
-    num_envs=4,
-    action_repeat=1,
-    unroll_length=30,
-    batch_size=4,
-    num_minibatches=1,
-    num_update_epochs=1,
-    reward_scaling=10.0,
-    entropy_cost=3e-4,
-    episode_length=1000,
-    discounting=0.99,
-    learning_rate=5e-4,
-    max_gradient_norm=1e9,
-    logdir="",
-    normalize_observations=True,
-    num_videos=1,
-    min_replay_size=8192,
-    max_replay_size=1048576,
-    grad_updates_per_step=1.0,
-    logging=WandBLogger.get_default_config(),
-    dataset=Dataset.get_default_config(),
-    log_all_worker=False,
-    knn_avg=True,
-    knn_k=64,
-    use_apt_to_play=False,
-    save_every_play=False,
-    save_last_play=False,
-    load_data_dir="",
-    use_reward_to_adapt=False,
-    sample_chuck_size=0,
-    adapt_updates_per_step=256,
-)
+    FLAGS_DEF = define_flags_with_default(
+        learner="sac",
+        env="ant",
+        total_env_steps=50000000,
+        eval_frequency=10,
+        seed=0,
+        num_envs=4,
+        action_repeat=1,
+        unroll_length=30,
+        batch_size=4,
+        num_minibatches=1,
+        num_update_epochs=1,
+        reward_scaling=10.0,
+        entropy_cost=3e-4,
+        episode_length=1000,
+        discounting=0.99,
+        learning_rate=5e-4,
+        max_gradient_norm=1e9,
+        logdir="",
+        normalize_observations=True,
+        num_videos=1,
+        min_replay_size=8192,
+        max_replay_size=1048576,
+        grad_updates_per_step=1.0,
+        logging=WandBLogger.get_default_config(),
+        dataset=Dataset.get_default_config(),
+        log_all_worker=False,
+        knn_avg=True,
+        knn_k=64,
+        use_apt_to_play=False,
+        save_every_play=False,
+        save_last_play=False,
+        load_data_dir="",
+        use_reward_to_adapt=False,
+        sample_chuck_size=0,
+        adapt_updates_per_step=256,
+    )
 
 
 def main(unused_argv):
@@ -62,24 +61,10 @@ def main(unused_argv):
     FLAGS = flags.FLAGS
     variant = get_user_flags(FLAGS, FLAGS_DEF)
 
-    jax_devices = jax.local_devices()
-    n_devices = len(jax_devices)
-    assert FLAGS.batch_size % n_devices == 0
-
-    variant["jax_process_index"] = jax.process_index()
-    variant["jax_process_count"] = jax.process_count()
     if FLAGS.load_data_dir == "":
         data_dir = Path(f"/tmp/{uuid.uuid4().hex}")
     else:
         data_dir = Path(FLAGS.load_data_dir)
-    variant["data_dir"] = str(data_dir)
-    logging.info(f"data dir is {str(data_dir)}")
-    logger = WandBLogger(
-        config=FLAGS.logging,
-        variant=variant,
-        enable=FLAGS.log_all_worker or (jax.process_index() == 0),
-    )
-    logger.log(prefix_metrics(variant, "variant"))
 
     if FLAGS.learner == "leapt":
         num_updates = int(FLAGS.num_envs * FLAGS.grad_updates_per_step)
@@ -124,6 +109,21 @@ def main(unused_argv):
         data_storage = None
         data_iter = None
         data_n_worker = 1
+
+    jax_devices = jax.local_devices()
+    n_devices = len(jax_devices)
+    assert FLAGS.batch_size % n_devices == 0
+
+    variant["jax_process_index"] = jax.process_index()
+    variant["jax_process_count"] = jax.process_count()
+    variant["data_dir"] = str(data_dir)
+    logging.info(f"data dir is {str(data_dir)}")
+    logger = WandBLogger(
+        config=FLAGS.logging,
+        variant=variant,
+        enable=FLAGS.log_all_worker or (jax.process_index() == 0),
+    )
+    logger.log(prefix_metrics(variant, "variant"))
 
     env_fn = envs.create_fn(FLAGS.env)
 
