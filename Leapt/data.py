@@ -125,8 +125,13 @@ def process_episode(episode, num_sample):
 
 
 def save_episode(episode, fn):
-    with fn.open("wb") as f:
-        np.save(f, episode)
+    with io.BytesIO() as f1:
+        np.save(f1, episode)
+        f1.seek(0)
+        with fn.open('wb') as f2:
+            f2.write(f1.read())
+    # with fn.open("wb") as f:
+    #     np.save(f, episode)
 
 
 def load_episode(fn):
