@@ -1,59 +1,64 @@
-if __name__ == "__main__":
-    import os
-    import uuid
+import os
+import uuid
 
-    import jax
-    from absl import app, flags
-    from brax import envs
-    from brax.io import html, metrics, model
+import jax
+from absl import app, flags
+from brax import envs
+from brax.io import html, metrics, model
 
-    from .leapt import train_leapt
-    from .sac import train_sac
-    from .utils import WandBLogger, define_flags_with_default, get_user_flags, prefix_metrics
-    from .data import Dataset, EmptyDataset, LoadDataset
-    from pathlib import Path
-    from flax import jax_utils
-    import numpy as np
-    import logging
+from .leapt import train_leapt
+from .sac import train_sac
+from .utils import (
+    WandBLogger,
+    define_flags_with_default,
+    get_user_flags,
+    prefix_metrics,
+)
+from .data import Dataset, EmptyDataset, LoadDataset
+from pathlib import Path
+from flax import jax_utils
+import numpy as np
+import logging
+import tensorflow as tf
 
 
-    FLAGS_DEF = define_flags_with_default(
-        learner="sac",
-        env="ant",
-        total_env_steps=50000000,
-        eval_frequency=10,
-        seed=0,
-        num_envs=4,
-        action_repeat=1,
-        unroll_length=30,
-        batch_size=4,
-        num_minibatches=1,
-        num_update_epochs=1,
-        reward_scaling=10.0,
-        entropy_cost=3e-4,
-        episode_length=1000,
-        discounting=0.99,
-        learning_rate=5e-4,
-        max_gradient_norm=1e9,
-        logdir="",
-        normalize_observations=True,
-        num_videos=1,
-        min_replay_size=8192,
-        max_replay_size=1048576,
-        grad_updates_per_step=1.0,
-        logging=WandBLogger.get_default_config(),
-        dataset=Dataset.get_default_config(),
-        log_all_worker=False,
-        knn_avg=True,
-        knn_k=64,
-        use_apt_to_play=False,
-        save_every_play=False,
-        save_last_play=False,
-        load_data_dir="",
-        use_reward_to_adapt=False,
-        sample_chuck_size=0,
-        adapt_updates_per_step=256,
-    )
+FLAGS_DEF = define_flags_with_default(
+    learner="sac",
+    env="ant",
+    total_env_steps=50000000,
+    eval_frequency=10,
+    seed=0,
+    num_envs=4,
+    action_repeat=1,
+    unroll_length=30,
+    batch_size=4,
+    num_minibatches=1,
+    num_update_epochs=1,
+    reward_scaling=10.0,
+    entropy_cost=3e-4,
+    episode_length=1000,
+    discounting=0.99,
+    learning_rate=5e-4,
+    max_gradient_norm=1e9,
+    logdir="",
+    normalize_observations=True,
+    num_videos=1,
+    min_replay_size=8192,
+    max_replay_size=1048576,
+    grad_updates_per_step=1.0,
+    logging=WandBLogger.get_default_config(),
+    dataset=Dataset.get_default_config(),
+    log_all_worker=False,
+    knn_avg=True,
+    knn_k=64,
+    use_apt_to_play=False,
+    save_every_play=False,
+    save_last_play=False,
+    load_data_dir="",
+    use_reward_to_adapt=False,
+    sample_chuck_size=0,
+    adapt_updates_per_step=256,
+)
 
 
 def main(unused_argv):
@@ -62,14 +67,15 @@ def main(unused_argv):
     variant = get_user_flags(FLAGS, FLAGS_DEF)
 
     if FLAGS.load_data_dir == "":
-        data_dir = Path(f"/tmp/{uuid.uuid4().hex}")
+        data_dir = Path(f"./logs/{uuid.uuid4().hex}")
     else:
         data_dir = Path(FLAGS.load_data_dir)
+
+    env_fn = envs.create_fn(FLAGS.env)
 
     if FLAGS.learner == "leapt":
         num_updates = int(FLAGS.num_envs * FLAGS.grad_updates_per_step)
         num_sample_total = num_updates * FLAGS.batch_size
-        data_n_worker = FLAGS.dataset.n_worker
         if FLAGS.sample_chuck_size == 0:
             sample_chuck_size = FLAGS.num_envs
         else:
@@ -77,38 +83,63 @@ def main(unused_argv):
         data_batch_size = int(num_sample_total / sample_chuck_size)
 
         if FLAGS.use_reward_to_adapt:
-            dataset = LoadDataset(FLAGS.dataset, data_dir, sample_chuck_size)
+            data_storage = LoadDataset(FLAGS.dataset, data_dir, sample_chuck_size)
         elif FLAGS.use_apt_to_play:
-            dataset = EmptyDataset(FLAGS.dataset, data_dir, sample_chuck_size)
+            data_storage = EmptyDataset(FLAGS.dataset, data_dir, sample_chuck_size)
 
-        data_loader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=data_batch_size,
-            num_workers=data_n_worker,
-            prefetch_factor=2,
-            persistent_workers=True,
-            drop_last=True,
+        # example = next(iter(data_storage._generate_chunks()))
+        dummy_env = env_fn(
+            action_repeat=FLAGS.action_repeat,
+            batch_size=FLAGS.num_envs * jax.local_device_count(),
+            episode_length=FLAGS.episode_length,
         )
-
-        data_storage = dataset._storage
+        action_size = dummy_env.action_size
+        dummy_state = jax.jit(dummy_env.reset)(jax.random.PRNGKey(42))
+        _, obs_size = dummy_state.obs.shape
+        example = dict(
+            episode=np.zeros(
+                shape=(
+                    jax.local_device_count(),
+                    sample_chuck_size,
+                    obs_size * 2 + action_size + 1 + 1 + 1,
+                ),
+                dtype=np.float32,
+            )
+        )
+        dataset = tf.data.Dataset.from_generator(
+            lambda: data_storage._generate_chunks(),
+            {k: v.dtype for k, v in example.items()},
+            {k: v.shape for k, v in example.items()},
+        )
+        dataset = dataset.batch(data_batch_size, drop_remainder=True)
+        dataset = dataset.prefetch(5)
 
         def generate_batch(it):
             def prepare_data(xs):
                 def _prepare(x):
-                    return x.reshape((jax.local_device_count(), num_updates, FLAGS.batch_size,  x.shape[-1]))
+                    return x.reshape(
+                        (
+                            jax.local_device_count(),
+                            num_updates,
+                            FLAGS.batch_size,
+                            x.shape[-1],
+                        )
+                    )
 
                 return jax.tree_map(_prepare, xs)
 
             while True:
                 for batch in it:
+                    batch = batch["episode"]
                     batch = np.asarray(batch)
+                    # batch = batch._numpy()
                     yield prepare_data(batch)
 
-        data_iter = iter(jax_utils.prefetch_to_device(generate_batch(data_loader), 2))
+        # data_iter = iter(jax_utils.prefetch_to_device(map(prepare_data, dataset), 2))
+        data_iter = iter(jax_utils.prefetch_to_device(generate_batch(dataset), 2))
     else:
-        data_storage = None
         data_iter = None
-        data_n_worker = 1
+        data_storage = None
 
     jax_devices = jax.local_devices()
     n_devices = len(jax_devices)
@@ -124,8 +155,6 @@ def main(unused_argv):
         enable=FLAGS.log_all_worker or (jax.process_index() == 0),
     )
     logger.log(prefix_metrics(variant, "variant"))
-
-    env_fn = envs.create_fn(FLAGS.env)
 
     with metrics.Writer(FLAGS.logdir) as writer:
         writer.write_hparams(
@@ -183,7 +212,6 @@ def main(unused_argv):
                 save_last_play=FLAGS.save_last_play,
                 data_storage=data_storage,
                 data_iter=data_iter,
-                data_n_worker=data_n_worker,
                 data_dir=data_dir,
             )
 
@@ -215,6 +243,4 @@ def main(unused_argv):
 
 
 if __name__ == "__main__":
-    import torch
-    torch.multiprocessing.set_start_method("spawn")
     app.run(main)

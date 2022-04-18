@@ -7,7 +7,9 @@ from copy import copy
 from pathlib import Path
 
 import numpy as np
+import torch
 from ml_collections import ConfigDict
+from torch.utils.data import IterableDataset
 import logging
 
 
@@ -16,7 +18,7 @@ Various datasets' implementations for Brax simulation
 """
 
 
-class Dataset():
+class Dataset(IterableDataset):
     @staticmethod
     def get_default_config(updates=None):
         config = ConfigDict()
@@ -51,7 +53,7 @@ class EmptyDataset(Dataset):
         # storage
         self._data_dir = data_dir
         data_dir.mkdir(exist_ok=True)
-        self._pre_episode_fns = []
+        self._all_eps_fns = []
         self._preload()
 
     def _sample_episode(self):
@@ -78,9 +80,18 @@ class EmptyDataset(Dataset):
         if self._samples_since_last_fetch < self._fetch_every:
             return
         self._samples_since_last_fetch = 0
+        try:
+            worker_id = torch.utils.data.get_worker_info().id
+        except:
+            worker_id = 0
         fetched_size = 0
-        for eps_fn in reversed(self._pre_episode_fns):
+        for eps_fn in reversed(self._all_eps_fns):
             eps_idx, eps_len = [int(x) for x in eps_fn.stem.split("_")[1:]]
+            # if worker_id == 0:
+            #     print(f"total number of eps is {len(self._storage.all_eps_fns)}")
+            #     print(f"before store, eps_idx is {eps_idx}, worker_id is {worker_id}, number is {len(self._episode_fns)}")
+            if eps_idx % self._n_worker != worker_id:
+                continue
             if eps_fn in self._episodes.keys():
                 break
             if fetched_size + eps_len > self._max_size:
@@ -88,6 +99,8 @@ class EmptyDataset(Dataset):
             fetched_size += eps_len
             if not self._store_episode(eps_fn):
                 break
+            # if worker_id == 0:
+            #     print(f"after store, eps_idx is {eps_idx}, worker_id is {worker_id}, number is {len(self._episode_fns)}")
 
     def _sample(self):
         try:
@@ -96,13 +109,9 @@ class EmptyDataset(Dataset):
             traceback.print_exc()
         self._samples_since_last_fetch += 1
         episode = self._sample_episode()
-        return dict(episode=process_episode(episode, self._sample_chuck_size))
+        return process_episode(episode, self._sample_chuck_size)
 
     def __iter__(self):
-        while True:
-            yield self._sample()
-
-    def _generate_chunks(self):
         while True:
             yield self._sample()
 
@@ -112,43 +121,43 @@ class EmptyDataset(Dataset):
         self._num_episodes += 1
         self._num_transitions += eps_len
         ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
-        eps_fn = f"{ts}_{eps_idx}_{eps_len}.npz"
+        eps_fn = f"{ts}_{eps_idx}_{eps_len}.npy"
         save_episode(episode, self._data_dir / eps_fn)
         return self._data_dir / eps_fn
 
     def _preload(self):
         self._num_episodes = 0
         self._num_transitions = 0
-        for fn in self._data_dir.glob("*.npz"):
+        for fn in self._data_dir.glob("*.npy"):
             _, _, eps_len = fn.stem.split("_")
             self._num_episodes += 1
             self._num_transitions += int(eps_len)
 
     def add(self, episode):
-        episode = dict(episode=episode)
-        episode = {key: convert(value) for key, value in episode.items()}
         eps_fn = self._save_episode(episode)
-        self._pre_episode_fns.append(eps_fn)
+        self._all_eps_fns.append(eps_fn)
 
 
 def process_episode(episode, num_sample):
-    episode = episode["episode"]
+    # episode = episode["episode"]
     idx = np.random.randint(0, episode_len(episode), size=num_sample)
     return episode[:, idx, :]
 
 
 def save_episode(episode, fn):
     with io.BytesIO() as f1:
-        np.savez_compressed(f1, **episode)
+        np.save(f1, episode)
         f1.seek(0)
         with fn.open("wb") as f2:
             f2.write(f1.read())
+    # with fn.open("wb") as f:
+    #     np.save(f, episode)
 
 
 def load_episode(fn):
     with fn.open("rb") as f:
         episode = np.load(f)
-        episode = {k: episode[k] for k in episode.keys()}
+        # episode = {k: episode[k] for k in episode.keys()}
         return episode
 
 
@@ -157,16 +166,6 @@ def episode_len(episode):
         return list(episode.values())[0].shape[0]
     return episode.shape[1]
 
-
-def convert(value):
-    value = np.array(value)
-    if np.issubdtype(value.dtype, np.floating):
-        return value.astype(np.float32)
-    elif np.issubdtype(value.dtype, np.signedinteger):
-        return value.astype(np.int32)
-    elif np.issubdtype(value.dtype, np.uint8):
-        return value.astype(np.uint8)
-    return value
 
 class LoadDataset(Dataset):
     @staticmethod
@@ -193,10 +192,17 @@ class LoadDataset(Dataset):
 
     def _load(self):
         logging.info(f"Labeling data... from {self._data_dir}")
-        eps_fns = sorted(self._data_dir.glob("*.npz"))
+        try:
+            worker_id = torch.utils.data.get_worker_info().id
+        except:
+            worker_id = 0
+        eps_fns = sorted(self._data_dir.glob("*.npy"))
         for eps_fn in eps_fns:
             if self._size > self._max_size:
                 break
+            eps_idx, eps_len = [int(x) for x in eps_fn.stem.split("_")[1:]]
+            if eps_idx % self._n_worker != worker_id:
+                continue
             episode = load_episode(eps_fn)
             self._episode_fns.append(eps_fn)
             self._episodes[eps_fn] = episode

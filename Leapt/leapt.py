@@ -141,7 +141,6 @@ def train_leapt(
     data_storage = None,
     data_iter = None,
     data_dir = None,
-    data_n_worker: int = 1,
 ):
     """SAC training."""
     assert min_replay_size % num_envs == 0
@@ -785,17 +784,16 @@ def train_leapt(
                 current_position=jnp.zeros((local_devices_to_use,), dtype=jnp.int32),
             )
 
-            for _ in range(data_n_worker):
-                training_state, state, replay_buffer = init_replay_buffer(
-                    training_state, state, replay_buffer
-                )
-                sampling_walltime += time.time() - t
+            training_state, state, replay_buffer = init_replay_buffer(
+                training_state, state, replay_buffer
+            )
+            sampling_walltime += time.time() - t
 
-                store_t = time.time()
-                replay_buffer_data = replay_buffer.data.block_until_ready()
-                if save_every_play:
-                    data_storage.add(replay_buffer_data)
-                storing_walltime += time.time() - store_t
+            store_t = time.time()
+            replay_buffer_data = replay_buffer.data.block_until_ready()
+            if save_every_play:
+                data_storage.add(replay_buffer_data)
+            storing_walltime += time.time() - store_t
             print(f'init sampling walltime: {sampling_walltime}')
             print(f'init storing walltime: {storing_walltime}')
 

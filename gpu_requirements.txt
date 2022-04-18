@@ -1,0 +1,12 @@
+-f https://storage.googleapis.com/jax-releases/jax_releases.html
+jax[cuda]==0.3.4
+flax==0.4.0
+optax==0.1.1
+distrax==0.1.1
+tqdm
+cloudpickle
+dill
+ml_collections
+wandb
+scikit-image
+gcsfs
