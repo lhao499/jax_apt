@@ -4,8 +4,8 @@ SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 PROJECT_DIR="$( cd -- "$( dirname -- "$SCRIPT_DIR" )" &> /dev/null && pwd )"
 
 for host in "$@"; do
-    echo "Cleanning on host: $host"
-    ssh $host 'rm -rf ~/m3ae' &
+    scp $SCRIPT_DIR/gpu_vm_setup.sh $host:~/
+    ssh $host '~/gpu_vm_setup.sh' &
 done
 
 wait

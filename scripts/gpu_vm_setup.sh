@@ -2,7 +2,6 @@
 
 sudo apt-get update && sudo apt-get install -y \
     build-essential \
-    python-is-python3 \
     tmux \
     htop \
     git \
@@ -12,9 +11,9 @@ sudo apt-get update && sudo apt-get install -y \
     nfs-common
 
 
-cat > $HOME/tpu_requirements.txt <<- EndOfFile
--f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-jax[tpu]==0.3.4
+cat > $HOME/gpu_requirements.txt <<- EndOfFile
+-f https://storage.googleapis.com/jax-releases/jax_releases.html
+jax[cuda]==0.3.4
 flax==0.4.0
 optax==0.1.1
 distrax==0.1.1
@@ -31,7 +30,7 @@ torch==1.8.2+cpu
 torchvision==0.9.2+cpu
 EndOfFile
 
-pip install -r $HOME/tpu_requirements.txt
+pip install --no-cache-dir -r $HOME/gpu_requirements.txt --user
 
 
 # VIM configurations

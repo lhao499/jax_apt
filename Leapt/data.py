@@ -22,7 +22,6 @@ class Dataset():
         config = ConfigDict()
         config.fetch_every = 1
         config.max_size = int(1e42)
-        config.n_worker = 2
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
@@ -39,12 +38,10 @@ class EmptyDataset(Dataset):
         self._episode_fns = []
         self._episodes = dict()
         self._size = 0
-
-        self._n_worker = self.config.n_worker
-        self._max_size = self.config.max_size / self._n_worker
+        self._max_size = self.config.max_size
 
         self._fetch_every = self.config.fetch_every
-        self._samples_since_last_fetch = self.config.fetch_every
+        self._fetch_count = self.config.fetch_every
 
         self._sample_chuck_size = sample_chuck_size
 
@@ -68,16 +65,15 @@ class EmptyDataset(Dataset):
             early_eps_fn = self._episode_fns.pop(0)
             early_eps = self._episodes.pop(early_eps_fn)
             self._size -= episode_len(early_eps)
-            early_eps_fn.unlink(missing_ok=True)
+            # early_eps_fn.unlink(missing_ok=True) # NOTE: not relevant for keep replay buffer size
         self._episode_fns.append(eps_fn)
         self._episodes[eps_fn] = episode
         self._size += eps_len
         return True
 
     def _try_fetch(self):
-        if self._samples_since_last_fetch < self._fetch_every:
+        if self._fetch_count < self._fetch_every:
             return
-        self._samples_since_last_fetch = 0
         fetched_size = 0
         for eps_fn in reversed(self._pre_episode_fns):
             eps_idx, eps_len = [int(x) for x in eps_fn.stem.split("_")[1:]]
@@ -93,8 +89,9 @@ class EmptyDataset(Dataset):
         try:
             self._try_fetch()
         except:
+            print("bad thing happened....")
             traceback.print_exc()
-        self._samples_since_last_fetch += 1
+        self._fetch_count += 1
         episode = self._sample_episode()
         return dict(episode=process_episode(episode, self._sample_chuck_size))
 
@@ -180,12 +177,7 @@ class LoadDataset(Dataset):
         self._size = 0
         self._data_dir = data_dir
         self._storage = None
-
-        self._n_worker = self.config.n_worker
-        self._max_size = self.config.max_size / self._n_worker
-
-        self._fetch_every = self.config.fetch_every
-        self._samples_since_last_fetch = self.config.fetch_every
+        self._max_size = self.config.max_size
 
         self._sample_chuck_size = sample_chuck_size
 

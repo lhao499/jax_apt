@@ -18,6 +18,7 @@ from .data import Dataset, EmptyDataset, LoadDataset
 from pathlib import Path
 from flax import jax_utils
 import numpy as np
+import jax.numpy as jnp
 import logging
 import tensorflow as tf
 
@@ -40,7 +41,6 @@ FLAGS_DEF = define_flags_with_default(
     discounting=0.99,
     learning_rate=5e-4,
     max_gradient_norm=1e9,
-    logdir="",
     normalize_observations=True,
     num_videos=1,
     min_replay_size=8192,
@@ -66,25 +66,40 @@ def main(unused_argv):
     FLAGS = flags.FLAGS
     variant = get_user_flags(FLAGS, FLAGS_DEF)
 
+    jax_devices = jax.local_devices()
+    n_devices = len(jax_devices)
+    assert FLAGS.batch_size % n_devices == 0
+    env_fn = envs.create_fn(FLAGS.env)
+
+    variant["jax_process_index"] = jax.process_index()
+    variant["jax_process_count"] = jax.process_count()
+    logger = WandBLogger(
+        config=FLAGS.logging,
+        variant=variant,
+        enable=FLAGS.log_all_worker or (jax.process_index() == 0),
+    )
+    logger.log(prefix_metrics(variant, "variant"))
+    logger_output_dir = logger.config.output_dir
+
     if FLAGS.load_data_dir == "":
-        data_dir = Path(f"./logs/{uuid.uuid4().hex}")
+        data_dir = Path(logger_output_dir) / "data"
     else:
         data_dir = Path(FLAGS.load_data_dir)
 
-    env_fn = envs.create_fn(FLAGS.env)
+    logging.info(f"data dir is {str(data_dir)}")
 
     if FLAGS.learner == "leapt":
-        num_updates = int(FLAGS.num_envs * FLAGS.grad_updates_per_step)
-        num_sample_total = num_updates * FLAGS.batch_size
         if FLAGS.sample_chuck_size == 0:
             sample_chuck_size = FLAGS.num_envs
         else:
             sample_chuck_size = FLAGS.sample_chuck_size
-        data_batch_size = int(num_sample_total / sample_chuck_size)
+        num_updates = int(FLAGS.num_envs * FLAGS.grad_updates_per_step)
+        total_num_to_sample = num_updates * FLAGS.batch_size
+        data_batch_size = int(total_num_to_sample / sample_chuck_size)
 
         if FLAGS.use_reward_to_adapt:
             data_storage = LoadDataset(FLAGS.dataset, data_dir, sample_chuck_size)
-        elif FLAGS.use_apt_to_play:
+        else:
             data_storage = EmptyDataset(FLAGS.dataset, data_dir, sample_chuck_size)
 
         # example = next(iter(data_storage._generate_chunks()))
@@ -117,7 +132,7 @@ def main(unused_argv):
         def generate_batch(it):
             def prepare_data(xs):
                 def _prepare(x):
-                    return x.reshape(
+                    x = x.reshape(
                         (
                             jax.local_device_count(),
                             num_updates,
@@ -125,14 +140,14 @@ def main(unused_argv):
                             x.shape[-1],
                         )
                     )
+                    return x
 
                 return jax.tree_map(_prepare, xs)
 
             while True:
                 for batch in it:
-                    batch = batch["episode"]
-                    batch = np.asarray(batch)
-                    # batch = batch._numpy()
+                    batch = batch["episode"]._numpy()
+                    batch = np.random.permutation(batch)
                     yield prepare_data(batch)
 
         # data_iter = iter(jax_utils.prefetch_to_device(map(prepare_data, dataset), 2))
@@ -141,22 +156,7 @@ def main(unused_argv):
         data_iter = None
         data_storage = None
 
-    jax_devices = jax.local_devices()
-    n_devices = len(jax_devices)
-    assert FLAGS.batch_size % n_devices == 0
-
-    variant["jax_process_index"] = jax.process_index()
-    variant["jax_process_count"] = jax.process_count()
-    variant["data_dir"] = str(data_dir)
-    logging.info(f"data dir is {str(data_dir)}")
-    logger = WandBLogger(
-        config=FLAGS.logging,
-        variant=variant,
-        enable=FLAGS.log_all_worker or (jax.process_index() == 0),
-    )
-    logger.log(prefix_metrics(variant, "variant"))
-
-    with metrics.Writer(FLAGS.logdir) as writer:
+    with metrics.Writer(logger_output_dir) as writer:
         writer.write_hparams(
             {
                 "log_frequency": FLAGS.eval_frequency,
@@ -217,8 +217,9 @@ def main(unused_argv):
 
     # Save to flax serialized checkpoint.
     filename = f"{FLAGS.env}_{FLAGS.learner}.pkl"
-    path = os.path.join(FLAGS.logdir, filename)
-    model.save_params(path, params)
+    # path = os.path.join(logger.config.output_dir, filename)
+    # model.save_params(path, params)
+    logger.save_pickle(params, filename)
 
     # Output an episode trajectory.
     env = env_fn()
@@ -238,7 +239,7 @@ def main(unused_argv):
             qps.append(state.qp)
             state, rng = jit_next_state(state, rng)
 
-        html_path = f"{FLAGS.logdir}/trajectory_{uuid.uuid4()}.html"
+        html_path = f"{logger_output_dir}/trajectory_{uuid.uuid4()}.html"
         html.save_html(html_path, env.sys, qps)
 
 

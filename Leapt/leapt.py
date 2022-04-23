@@ -837,7 +837,7 @@ def train_leapt(
         training_walltime += time.time() - t
 
     if save_last_play:
-        save_episode(replay_buffer_data, Path(data_dir/"episode"))
+        save_episode(replay_buffer_data, Path(data_dir/"last_replay"))
 
     normalizer_params = jax.tree_map(lambda x: x[0], training_state.normalizer_params)
     policy_params = jax.tree_map(lambda x: x[0], training_state.policy_params)
