@@ -26,29 +26,6 @@ from ml_collections.config_dict import config_dict
 from ml_collections.config_flags import config_flags
 
 
-class JaxRNG(object):
-    def __init__(self, seed):
-        self.rng = jax.random.PRNGKey(seed)
-
-    def __call__(self, n=1):
-        if n == 1:
-            self.rng, next_rng = jax.random.split(self.rng)
-            return next_rng
-        rngs = jax.random.split(self.rng, n + 1)
-        self.rng = rngs[0]
-        return tuple(rngs[1:])
-
-
-def init_rng(seed):
-    global jax_utils_rng
-    jax_utils_rng = JaxRNG(seed)
-
-
-def next_rng(n=1):
-    global jax_utils_rng
-    return jax_utils_rng(n)
-
-
 def get_metrics(metrics, unreplicate=False):
     if unreplicate:
         metrics = jax_utils.unreplicate(metrics)
@@ -136,7 +113,7 @@ class VideoRecorder:
         is_train=False,
     ):
         self.is_train = is_train
-        self.save_dir = root_dir / ("train_video" if self.is_train else "test_video")
+        self.save_dir = os.path.join(root_dir, "train_video" if self.is_train else "test_video")
         self.render_size = render_size
         self.fps = fps
         self.frames = []
@@ -270,14 +247,15 @@ class WandBLogger(object):
     def get_default_config(updates=None):
         config = ConfigDict()
         config.online = False
-        config.prefix = "APTv2"
-        config.project = "aptv2"
-        config.output_dir = "/tmp/aptv2"
+        config.prefix = "exp"
+        config.project = "jax-apt"
+        config.output_dir = "/tmp/jax-apt"
         config.gcs_output_dir = ""
         config.random_delay = 0.0
         config.experiment_id = config_dict.placeholder(str)
         config.anonymous = config_dict.placeholder(str)
         config.notes = config_dict.placeholder(str)
+        config.code_dir = "."
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
@@ -291,8 +269,8 @@ class WandBLogger(object):
             self.config.experiment_id = uuid.uuid4().hex
 
         if self.config.prefix != "":
-            self.config.project = "{}--{}".format(
-                self.config.prefix, self.config.project
+            self.config.experiment_id = "{}--{}".format(
+                self.config.prefix, self.config.experiment_id
             )
 
         if self.enable:
@@ -329,6 +307,7 @@ class WandBLogger(object):
                 settings=wandb.Settings(
                     start_method="thread",
                     _disable_stats=True,
+                    code_dir=self.config.code_dir,
                 ),
                 mode="online" if self.config.online else "offline",
             )
@@ -359,13 +338,7 @@ class WandBLogger(object):
 
     @property
     def output_dir(self):
-        return Path(self.config.output_dir)
-
-
-def update_target_network(main_params, target_params, tau):
-    return jax.tree_multimap(
-        lambda x, y: tau * x + (1.0 - tau) * y, main_params, target_params
-    )
+        return self.config.output_dir
 
 
 def load_pickle(path):
@@ -386,3 +359,59 @@ def load_checkpoint(path):
         data["step"],
     )
     return data
+
+
+class JaxRNG(object):
+    """A convenient stateful Jax RNG wrapper. Can be used to wrap RNG inside
+    pure function.
+    """
+
+    @classmethod
+    def from_seed(cls, seed):
+        return cls(jax.random.PRNGKey(seed))
+
+    def __init__(self, rng):
+        self.rng = rng
+
+    def __call__(self, keys=None):
+        if keys is None:
+            self.rng, split_rng = jax.random.split(self.rng)
+            return split_rng
+        elif isinstance(keys, int):
+            split_rngs = jax.random.split(self.rng, num=keys + 1)
+            self.rng = split_rngs[0]
+            return tuple(split_rngs[1:])
+        else:
+            split_rngs = jax.random.split(self.rng, num=len(keys) + 1)
+            self.rng = split_rngs[0]
+            return {key: val for key, val in zip(keys, split_rngs[1:])}
+
+
+def wrap_function_with_rng(rng):
+    """To be used as decorator, automatically bookkeep a RNG for the wrapped function."""
+
+    def wrap_function(function):
+        def wrapped(*args, **kwargs):
+            nonlocal rng
+            rng, split_rng = jax.random.split(rng)
+            return function(split_rng, *args, **kwargs)
+
+        return wrapped
+
+    return wrap_function
+
+
+def init_rng(seed):
+    global jax_utils_rng
+    jax_utils_rng = JaxRNG.from_seed(seed)
+
+
+def next_rng(*args, **kwargs):
+    global jax_utils_rng
+    return jax_utils_rng(*args, **kwargs)
+
+
+def update_target_network(main_params, target_params, tau):
+    return jax.tree_multimap(
+        lambda x, y: tau * x + (1.0 - tau) * y, main_params, target_params
+    )

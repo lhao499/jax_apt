@@ -1,73 +1,70 @@
-if __name__ == "__main__":
-    import os
+import os
 
-    os.environ["MUJOCO_GL"] = "egl"
+os.environ["MUJOCO_GL"] = "egl"
 
-    import dataclasses
-    import pickle
-    import pprint
-    import random
-    import tempfile
-    import uuid
-    from copy import copy, deepcopy
-    from functools import partial
-    from pathlib import Path
+import dataclasses
+import pickle
+import pprint
+import random
+import tempfile
+import uuid
+from copy import copy, deepcopy
+from functools import partial
+from pathlib import Path
 
-    import absl.app
-    import absl.flags
-    from absl import logging
-    import flax
-    import jax
-    import jax.numpy as jnp
-    import numpy as np
-    import optax
-    import torch
-    import wandb
-    from dm_env import specs
-    from flax import jax_utils
-    from flax.training.train_state import TrainState
-    from tqdm.auto import tqdm, trange
+import absl.app
+import absl.flags
+from absl import logging
+import flax
+import jax
+import jax.numpy as jnp
+import numpy as np
+import optax
+import torch
+import wandb
+from dm_env import specs
+from flax import jax_utils
+from flax.training.train_state import TrainState
+from tqdm.auto import tqdm, trange
 
-    torch.multiprocessing.set_start_method("fork")
+from .data import LearnLabelDataset
+from .environment import Environment
+from .model import Critic, Policy, SamplerPolicy, Reward
+from .sampler import RolloutStorage
+from .utils import (VideoRecorder, WandBLogger, batched_random_crop,
+                    define_flags_with_default, get_metrics, get_user_flags,
+                    load_checkpoint, load_pickle, mse_loss, next_rng,
+                    prefix_metrics, set_random_seed, update_target_network,
+                    value_and_multi_grad)
 
-    from .data import LearnLabelDataset
-    from .environment import Environment
-    from .model import Critic, Policy, SamplerPolicy, Reward
-    from .sampler import RolloutStorage
-    from .utils import (VideoRecorder, WandBLogger, batched_random_crop,
-                        define_flags_with_default, get_metrics, get_user_flags,
-                        load_checkpoint, load_pickle, mse_loss, next_rng,
-                        prefix_metrics, set_random_seed, update_target_network,
-                        value_and_multi_grad)
-
-    FLAGS_DEF = define_flags_with_default(
-        seed=42,
-        n_total_iter=2000000,
-        n_train_step_per_iter=1,
-        n_sample_step_per_iter=1,
-        batch_size=1024,
-        dataloader_n_workers=16,
-        test_freq=1e5,
-        log_freq=1e3,
-        save_model_freq=0,
-        n_test_traj=5,
-        max_traj_length=1000,
-        logging=WandBLogger.get_default_config(),
-        data=LearnLabelDataset.get_default_config(),
-        env=Environment.get_default_config(),
-        policy=Policy.get_default_config(),
-        critic=Critic.get_default_config(),
-        reward=Reward.get_default_config(),
-        online=False,
-        log_all_worker=False,
-        load_data_dir="",
-        load_model_dir="",
-        policy_lr=3e-4,
-        critic_lr=3e-4,
-        reward_lr=3e-4,
-        soft_target_update_rate=1e-2,
-        nstep=3,
-    )
+FLAGS_DEF = define_flags_with_default(
+    seed=42,
+    n_total_iter=2000000,
+    n_train_step_per_iter=1,
+    n_sample_step_per_iter=1,
+    batch_size=1024,
+    dataloader_n_workers=16,
+    test_freq=1e5,
+    log_freq=1e3,
+    save_model_freq=0,
+    n_test_traj=5,
+    max_traj_length=1000,
+    logging=WandBLogger.get_default_config(),
+    data=LearnLabelDataset.get_default_config(),
+    env=Environment.get_default_config(),
+    policy=Policy.get_default_config(),
+    critic=Critic.get_default_config(),
+    reward=Reward.get_default_config(),
+    online=False,
+    log_all_worker=False,
+    load_data_dir="",
+    load_model_dir="",
+    policy_lr=3e-4,
+    critic_lr=3e-4,
+    reward_lr=3e-4,
+    soft_target_update_rate=1e-2,
+    nstep=3,
+)
 
 
 def create_train_step(
@@ -301,7 +298,7 @@ def main(argv):
     logger.log(prefix_metrics(variant, "variant"))
     set_random_seed(FLAGS.seed * (jax_process_index + 1))
 
-    video_recoder = VideoRecorder(root_dir=logger.output_dir / "video")
+    video_recoder = VideoRecorder(root_dir=os.path.join(logger.output_dir, "video"))
 
     train_sampler = RolloutStorage(train_env, FLAGS.max_traj_length, None)
     test_sampler = RolloutStorage(test_env, FLAGS.max_traj_length, video_recoder)
@@ -418,4 +415,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    torch.multiprocessing.set_start_method("spawn")
     absl.app.run(main)

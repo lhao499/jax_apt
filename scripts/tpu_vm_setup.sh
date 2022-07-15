@@ -14,22 +14,32 @@ sudo apt-get update && sudo apt-get install -y \
 
 cat > $HOME/tpu_requirements.txt <<- EndOfFile
 -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-jax[tpu]==0.3.4
-flax==0.4.0
+jax[tpu]==0.3.12
+flax==0.5.0
 optax==0.1.1
-distrax==0.1.1
--f https://download.pytorch.org/whl/lts/1.8/torch_lts.html
-torch==1.8.2+cpu
-torchvision==0.9.2+cpu
+distrax==0.1.2
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==1.10.2
+torchvision==0.11.3
 timm==0.5.4
-transformers==4.17.0
+transformers==4.19.4
+einops
 tqdm
 cloudpickle==2.0.0
 dill
 ml_collections
-wandb==0.12.7
+wandb==0.12.17
 scikit-image==0.19.2
 gcsfs==2022.02.0
+requests
+typing_extensions==4.2.0
+glfw
+glob2
+imageio
+imageio-ffmpeg
+moviepy
+dm-env
+dm_control
 EndOfFile
 
 pip install -r $HOME/tpu_requirements.txt
