@@ -25,3 +25,4 @@ imageio-ffmpeg
 moviepy
 dm-env
 dm_control
+numpy==1.22.0

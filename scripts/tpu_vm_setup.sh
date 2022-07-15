@@ -40,6 +40,7 @@ imageio-ffmpeg
 moviepy
 dm-env
 dm_control
+numpy==1.22.0
 EndOfFile
 
 pip install -r $HOME/tpu_requirements.txt
